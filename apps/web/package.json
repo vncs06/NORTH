@@ -1,0 +1,12 @@
+{
+  "name": "@north/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "next build",
+    "build:e2e": "next build",
+    "start": "next start --hostname 0.0.0.0",
+    "start:e2e": "next start --hostname 0.0.0.0"
+  }
+}

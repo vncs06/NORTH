@@ -1,0 +1,14 @@
+node_modules
+.next
+.next-e2e
+dist
+coverage
+playwright-report
+test-results
+package-lock.json
+packages/database/src/generated
+3E
+docs
+AGENTS.md
+apps/web/next-env.d.ts
+

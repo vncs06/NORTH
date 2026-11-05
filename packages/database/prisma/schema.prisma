@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Installation {
+  singletonKey Boolean  @id @default(true) @map("singleton_key")
+  id           String   @unique @db.Uuid
+  companyName  String   @map("company_name")
+  timezone     String
+  currency     String
+  createdAt    DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@map("installation")
+}
+
+model User {
+  id             String   @id @db.Uuid
+  name           String
+  emailNormalized String  @unique @map("email_normalized")
+  passwordHash   String   @map("password_hash")
+  role           String
+  status         String
+  sessionVersion Int      @map("session_version")
+  createdBy      String?  @map("created_by") @db.Uuid
+  disabledBy     String?  @map("disabled_by") @db.Uuid
+  disabledAt     DateTime? @map("disabled_at") @db.Timestamptz(6)
+  createdAt      DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@map("users")
+}
+
+model Material {
+  id             String   @id @db.Uuid
+  code           String
+  normalizedCode String   @unique @map("normalized_code")
+  name           String
+  description    String?
+  baseUnit       String   @map("base_unit")
+  minimumStock   Decimal  @map("minimum_stock") @db.Decimal(18, 6)
+  status         String
+  version        Int
+  createdBy      String   @map("created_by") @db.Uuid
+  updatedBy      String   @map("updated_by") @db.Uuid
+  createdAt      DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@map("materials")
+}
+

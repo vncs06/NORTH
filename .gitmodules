@@ -1,0 +1,4 @@
+[submodule "3E"]
+	path = 3E
+	url = https://github.com/vncs06/3E.git
+	branch = main

@@ -1,0 +1,20 @@
+name: north-erp
+services:
+  postgres:
+    image: postgres:18.1-alpine3.22
+    environment:
+      POSTGRES_DB: north
+      POSTGRES_USER: north
+      POSTGRES_PASSWORD: north_dev_only
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U north -d north']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - north_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  north_postgres_data:
