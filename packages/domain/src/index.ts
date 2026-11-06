@@ -151,6 +151,11 @@ const SENSITIVE_KEYS = new Set([
   'secret',
   'apikey',
   'api_key',
+  'cpf',
+  'cnpj',
+  'cpfcnpj',
+  'billingdocument',
+  'billing_document',
 ]);
 
 export function sanitizeAuditData(value: unknown): unknown {
@@ -163,4 +168,29 @@ export function sanitizeAuditData(value: unknown): unknown {
     );
   }
   return value;
+}
+
+const PERSONAL_AUDIT_KEYS = new Set([
+  'email',
+  'phone',
+  'operationalnote',
+  'operational_note',
+  'cpf',
+  'cnpj',
+  'cpfcnpj',
+  'billingdocument',
+  'billing_document',
+]);
+
+export function sanitizeBusinessAuditData(value: unknown): unknown {
+  const sanitized = sanitizeAuditData(value);
+  if (Array.isArray(sanitized)) return sanitized.map(sanitizeBusinessAuditData);
+  if (sanitized && typeof sanitized === 'object') {
+    return Object.fromEntries(
+      Object.entries(sanitized)
+        .filter(([key]) => !PERSONAL_AUDIT_KEYS.has(key.toLocaleLowerCase('en-US')))
+        .map(([key, nested]) => [key, sanitizeBusinessAuditData(nested)]),
+    );
+  }
+  return sanitized;
 }

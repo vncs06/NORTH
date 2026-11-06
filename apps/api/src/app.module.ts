@@ -16,6 +16,14 @@ import { CatalogRepository } from './catalog-repository.js';
 import { RequestAuthorization, RequestMiddleware } from './http.js';
 import { QuoteRepository } from './quote-repository.js';
 import { NorthRepository } from './repository.js';
+import {
+  AsaasConfigurationController,
+  AsaasWebhookController,
+  CustomerBillingController,
+  OrdersController,
+  OrderSettingsController,
+} from './fulfillment-controllers.js';
+import { FulfillmentRepository } from './fulfillment-repository.js';
 
 @Module({
   controllers: [
@@ -28,6 +36,11 @@ import { NorthRepository } from './repository.js';
     TechnicalSheetsController,
     PricingController,
     QuotesController,
+    CustomerBillingController,
+    OrderSettingsController,
+    AsaasConfigurationController,
+    AsaasWebhookController,
+    OrdersController,
   ],
   providers: [
     NorthRepository,
@@ -35,6 +48,7 @@ import { NorthRepository } from './repository.js';
     QuoteRepository,
     RequestAuthorization,
     RequestMiddleware,
+    FulfillmentRepository,
   ],
 })
 export class AppModule {}

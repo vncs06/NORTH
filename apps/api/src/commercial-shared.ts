@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseClient } from '@north/database';
-import { DomainError, sanitizeAuditData } from '@north/domain';
+import { DomainError, sanitizeBusinessAuditData } from '@north/domain';
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -41,9 +41,9 @@ export async function commercialAudit(
       input.resourceType,
       input.resourceId,
       input.correlationId,
-      JSON.stringify(sanitizeAuditData(input.before) ?? null),
-      JSON.stringify(sanitizeAuditData(input.after) ?? null),
-      JSON.stringify(sanitizeAuditData(input.metadata) ?? {}),
+      JSON.stringify(sanitizeBusinessAuditData(input.before) ?? null),
+      JSON.stringify(sanitizeBusinessAuditData(input.after) ?? null),
+      JSON.stringify(sanitizeBusinessAuditData(input.metadata) ?? {}),
     ],
   );
 }

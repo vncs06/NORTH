@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./commercial": "./src/commercial.ts"
+    "./commercial": "./src/commercial.ts",
+    "./fulfillment": "./src/fulfillment.ts"
   }
 }

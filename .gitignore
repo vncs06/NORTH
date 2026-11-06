@@ -11,4 +11,5 @@ test-results/
 *.log
 *.tsbuildinfo
 packages/database/src/generated/
+.north-private-files/
 

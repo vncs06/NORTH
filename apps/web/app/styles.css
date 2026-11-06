@@ -216,9 +216,15 @@ th {
   font-weight: 700;
 }
 .status.issued,
-.status.active {
+.status.active,
+.status.ready_for_production {
   color: #155b3b;
   background: #dff3e8;
+}
+.timeline-item {
+  border-left: 3px solid #8fb6a5;
+  padding: 0.35rem 0 1rem 1rem;
+  margin-left: 0.4rem;
 }
 .warning-row {
   background: #fff8dd;

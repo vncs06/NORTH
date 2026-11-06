@@ -1,9 +1,10 @@
 # NORTH ERP
 
-Incrementos verticais dos Sprints 001 e 002: instalação de empresa única,
+Incrementos verticais dos Sprints 001 a 003: instalação de empresa única,
 autenticação local, gestão de usuários, razão imutável de estoque, clientes,
 catálogo configurável, fichas técnicas versionadas, precificação explicável e
-orçamentos imutáveis com revisão explícita.
+orçamentos imutáveis com revisão explícita, pedidos, arte versionada, sinal Asaas e
+reserva rastreável de materiais.
 
 ## Requisitos
 
@@ -70,6 +71,7 @@ npm run db:test:migrate
 npm run db:test:reset
 npm run db:test:bootstrap
 npm run db:test:verify-sprint-002-migration
+npm run db:test:verify-sprint-003-migration
 npm run test:integration
 npm run test:e2e
 ```
@@ -102,7 +104,7 @@ npm audit --omit=dev
 mesmas travas e também exige portas E2E exclusivas. As proteções podem ser verificadas
 isoladamente com `npm run test:database-safety`.
 
-## Catálogo e orçamento
+## Catálogo, orçamento e pedido
 
 Após autenticar, o menu oferece clientes, catálogo, fichas, preços e orçamentos. O
 gestor configura produtos, variantes, técnicas, fichas e políticas; gestor e
@@ -110,9 +112,20 @@ funcionário podem cadastrar clientes, simular e emitir orçamentos dentro dos l
 de desconto aplicáveis. A emissão persiste custos, consumo, disponibilidade, fórmula
 e política usados. Alterações posteriores só entram em uma revisão explícita.
 
-O consumo mostrado no orçamento é demanda prevista: ele não cria movimento nem
-reserva estoque. A tela de detalhe possui uma versão de impressão pelo navegador;
-PDF, pedido, arte, cobrança, Asaas e reserva entram em incrementos posteriores.
+O consumo mostrado no orçamento continua sendo apenas demanda prevista. A conversão
+explícita em pedido copia esse snapshot. Uma reserva só é criada depois de arte
+aprovada, sinal confirmado ou exceção financeira gerencial e avaliação do saldo. A
+reserva altera apenas `reserved_quantity`; o físico não é consumido neste sprint.
+
+Artes PNG, JPEG e PDF ficam em armazenamento privado, fora do banco e ignorado pelo
+Git. API key, token do webhook e documento de cobrança são cifrados com AES-256-GCM.
+Em execução não local, `NORTH_SECRET_MASTER_KEY` é obrigatória. O worker processa
+outbox/inbox com repetição segura; o webhook persiste antes de responder HTTP 200.
+
+A integração habilitada é exclusivamente o Asaas Sandbox. Para desenvolvimento e
+E2E existe um stub contratual; homologação real exige credenciais fornecidas por
+variáveis ou pela tela gerencial e uma URL HTTPS pública. Nenhum segredo deve ser
+passado por argumento de comando ou commitado.
 
 ## Arquitetura e segurança
 
@@ -129,5 +142,6 @@ PDF, pedido, arte, cobrança, Asaas e reserva entram em incrementos posteriores.
   por constraints e triggers, além das invariantes da API.
 
 Esta entrega não declara prontidão de produção: recuperação de senha, MFA, control
-plane global e política jurídica de retenção permanecem pendentes; pedido, arte,
-Asaas e reserva de estoque não fazem parte do Sprint 002.
+plane global, política jurídica de retenção e homologação real do Sandbox permanecem
+pendentes. Produção, consumo, qualidade, cobrança de saldo, entrega e estorno
+automático não fazem parte do Sprint 003.

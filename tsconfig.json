@@ -19,6 +19,7 @@
     "paths": {
       "@north/domain": ["packages/domain/src/index.ts"],
       "@north/domain/commercial": ["packages/domain/src/commercial.ts"],
+      "@north/domain/fulfillment": ["packages/domain/src/fulfillment.ts"],
       "@north/application": ["packages/application/src/index.ts"],
       "@north/database": ["packages/database/src/index.ts"],
       "@north/auth": ["packages/auth/src/index.ts"],

@@ -4,7 +4,7 @@ import './styles.css';
 
 export const metadata: Metadata = {
   title: 'NORTH ERP',
-  description: 'Operação, catálogo e orçamento explicável',
+  description: 'Operação, catálogo, orçamento e prontidão de pedidos',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -22,6 +22,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             <Link href="/technical-sheets">Fichas</Link>
             <Link href="/pricing">Preços</Link>
             <Link href="/quotes">Orçamentos</Link>
+            <Link href="/orders">Pedidos</Link>
             <Link href="/settings/users">Usuários</Link>
             <Link href="/audit">Auditoria</Link>
           </nav>

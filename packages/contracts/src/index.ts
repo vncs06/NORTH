@@ -66,3 +66,4 @@ export const northAdminAuditAccess: NorthAdminAuditAccessContract = {
 };
 
 export * from './commercial.js';
+export * from './fulfillment.js';

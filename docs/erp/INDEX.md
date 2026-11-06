@@ -55,9 +55,12 @@ histórico.
 - Pendência jurídica: Q-052, política definitiva de retenção/eliminação.
 - Arquitetura-base: definida em ADR-015 e ADR-016.
 - Implementação: M1 concluído no commit `013bc8d`; Sprint 001 formalmente aceito
-  em 2026-11-05.
-- Sprint autorizado para planejamento/execução: Sprint 002 — catálogo, ficha técnica,
-  precificação e orçamento versionado.
+  em 2026-11-05. O Sprint 002 foi concluído e auditado na branch versionada pelo
+  commit `b3aa5b5` (implementação em `d504940`).
+- Sprint 003/M2B: `PARCIAL` na branch `sprint-003-pedido-arte-sinal-reserva`; núcleo
+  local demonstrado, com superfície Asaas complementar ainda incompleta e
+  homologação real bloqueada. A homologação depende de credenciais Sandbox e
+  endpoint HTTPS público fornecidos fora do repositório.
 
 ## Regra de atualização
 

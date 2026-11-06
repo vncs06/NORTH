@@ -2,14 +2,17 @@ import 'dotenv/config';
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import cookieParser from 'cookie-parser';
-import type { Request, Response } from 'express';
+import { json, type Request, type Response } from 'express';
 import { AppModule } from './app.module.js';
 import { ApiExceptionFilter, RequestMiddleware } from './http.js';
 import type { AuthenticatedRequest } from './types.js';
+import { assertSecretConfigurationOnStartup } from './fulfillment-infrastructure.js';
 
 export async function createApp() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  assertSecretConfigurationOnStartup();
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, bodyParser: false });
   app.setGlobalPrefix('api/v1');
+  app.use(json({ limit: '35mb' }));
   app.use(cookieParser());
   const requestMiddleware = new RequestMiddleware();
   app.use((request: Request, response: Response, next: () => void) =>

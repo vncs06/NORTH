@@ -20,6 +20,14 @@ export default defineConfig({
   },
   webServer: [
     {
+      command: 'npm run asaas:stub',
+      url: 'http://127.0.0.1:3199/health',
+      reuseExistingServer: false,
+      timeout: 120_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
       command: 'npm run start:e2e:api',
       url: `${apiOrigin}/api/v1/health`,
       reuseExistingServer: false,

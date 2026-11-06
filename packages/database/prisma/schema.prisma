@@ -69,8 +69,135 @@ model Customer {
   updatedBy             String   @map("updated_by") @db.Uuid
   createdAt             DateTime @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime @map("updated_at") @db.Timestamptz(6)
+  billingDocumentCiphertext Bytes? @map("billing_document_ciphertext")
+  billingDocumentNonce      Bytes? @map("billing_document_nonce")
+  billingDocumentAuthTag    Bytes? @map("billing_document_auth_tag")
+  billingDocumentHash       String? @unique @map("billing_document_hash") @db.Char(64)
+  billingDocumentLast4      String? @map("billing_document_last4") @db.VarChar(4)
 
   @@map("customers")
+}
+
+model DepositPolicy {
+  id                 String    @id @db.Uuid
+  versionNumber      Int       @unique @map("version_number")
+  status             String
+  rateBps            Int       @map("rate_bps")
+  minimumAmountCents BigInt    @map("minimum_amount_cents")
+  effectiveAt        DateTime  @map("effective_at") @db.Timestamptz(6)
+  createdBy          String    @map("created_by") @db.Uuid
+  archivedAt         DateTime? @map("archived_at") @db.Timestamptz(6)
+  createdAt          DateTime  @map("created_at") @db.Timestamptz(6)
+  @@map("deposit_policies")
+}
+
+model Order {
+  id                      String    @id @db.Uuid
+  commercialNumber        String    @unique @map("commercial_number")
+  quoteId                 String    @unique @map("quote_id") @db.Uuid
+  customerId              String    @map("customer_id") @db.Uuid
+  status                  String
+  version                 Int
+  quoteNumberSnapshot     String    @map("quote_number_snapshot")
+  customerNameSnapshot    String    @map("customer_name_snapshot")
+  totalAmountCents        BigInt    @map("total_amount_cents")
+  depositPolicyId         String    @map("deposit_policy_id") @db.Uuid
+  depositPolicyVersion    Int       @map("deposit_policy_version")
+  depositRateBps          Int       @map("deposit_rate_bps")
+  depositAmountCents      BigInt    @map("deposit_amount_cents")
+  paidAmountCents         BigInt    @map("paid_amount_cents")
+  currentArtworkVersionId String?   @map("current_artwork_version_id") @db.Uuid
+  createdBy               String    @map("created_by") @db.Uuid
+  cancelledBy             String?   @map("cancelled_by") @db.Uuid
+  cancellationReason      String?   @map("cancellation_reason")
+  cancelledAt             DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  createdAt               DateTime  @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime  @map("updated_at") @db.Timestamptz(6)
+  @@map("orders")
+}
+
+model OrderItem {
+  id                    String   @id @db.Uuid
+  orderId               String   @map("order_id") @db.Uuid
+  quoteItemId           String   @map("quote_item_id") @db.Uuid
+  displayOrder          Int      @map("display_order")
+  productCode           String   @map("product_code")
+  productName           String   @map("product_name")
+  variantCode           String   @map("variant_code")
+  variantName           String   @map("variant_name")
+  techniqueCode         String   @map("technique_code")
+  techniqueName         String   @map("technique_name")
+  requestedQuantity     Decimal  @map("requested_quantity") @db.Decimal(18, 6)
+  technicalSheetId      String   @map("technical_sheet_id") @db.Uuid
+  technicalSheetVersion Int      @map("technical_sheet_version")
+  createdAt             DateTime @map("created_at") @db.Timestamptz(6)
+  @@unique([orderId, quoteItemId])
+  @@map("order_items")
+}
+
+model OrderMaterialRequirement {
+  id               String   @id @db.Uuid
+  orderId          String   @map("order_id") @db.Uuid
+  orderItemId      String   @map("order_item_id") @db.Uuid
+  materialId       String   @map("material_id") @db.Uuid
+  materialCode     String   @map("material_code")
+  materialName     String   @map("material_name")
+  unit             String
+  requiredQuantity Decimal  @map("required_quantity") @db.Decimal(18, 6)
+  createdAt        DateTime @map("created_at") @db.Timestamptz(6)
+  @@unique([orderItemId, materialId])
+  @@map("order_material_requirements")
+}
+
+model PaymentCharge {
+  id                String   @id @db.Uuid
+  orderId           String   @map("order_id") @db.Uuid
+  provider          String
+  environment       String
+  externalChargeId  String?  @map("external_charge_id")
+  status            String
+  billingType       String   @map("billing_type")
+  amountCents       BigInt   @map("amount_cents")
+  dueDate           DateTime @map("due_date") @db.Date
+  invoiceUrl        String?  @map("invoice_url")
+  externalReference String   @map("external_reference")
+  version           Int
+  createdBy         String   @map("created_by") @db.Uuid
+  createdAt         DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @map("updated_at") @db.Timestamptz(6)
+  @@map("payment_charges")
+}
+
+model ArtworkVersion {
+  id                            String    @id @db.Uuid
+  orderId                       String    @map("order_id") @db.Uuid
+  versionNumber                 Int       @map("version_number")
+  fileId                        String    @unique @map("file_id") @db.Uuid
+  status                        String
+  customerConfirmationReference String?   @map("customer_confirmation_reference")
+  customerConfirmedAt           DateTime? @map("customer_confirmed_at") @db.Timestamptz(6)
+  customerConfirmedBy           String?   @map("customer_confirmed_by") @db.Uuid
+  createdBy                     String    @map("created_by") @db.Uuid
+  createdAt                     DateTime  @map("created_at") @db.Timestamptz(6)
+  @@unique([orderId, versionNumber])
+  @@map("artwork_versions")
+}
+
+model InventoryReservation {
+  id                 String    @id @db.Uuid
+  orderId            String    @map("order_id") @db.Uuid
+  materialId         String    @map("material_id") @db.Uuid
+  requiredQuantity   Decimal   @map("required_quantity") @db.Decimal(18, 6)
+  reservedQuantity   Decimal   @map("reserved_quantity") @db.Decimal(18, 6)
+  status             String
+  exceptionConfirmed Boolean   @map("exception_confirmed")
+  exceptionReason    String?   @map("exception_reason")
+  createdBy          String    @map("created_by") @db.Uuid
+  releasedBy         String?   @map("released_by") @db.Uuid
+  createdAt          DateTime  @map("created_at") @db.Timestamptz(6)
+  releasedAt         DateTime? @map("released_at") @db.Timestamptz(6)
+  @@unique([orderId, materialId])
+  @@map("inventory_reservations")
 }
 
 model Product {
