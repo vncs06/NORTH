@@ -4,7 +4,7 @@
 
 **PARCIAL.** A branch `sprint-003-pedido-arte-sinal-reserva`, baseada em `b3aa5b5`,
 contém o commit de implementação `5a6db44` (`feat: implement sprint 003 order
-readiness flow`). O núcleo vertical local funciona: orçamento emitido é convertido
+readiness flow`) e o commit inicial deste handoff `4d2b006`. O núcleo vertical local funciona: orçamento emitido é convertido
 uma única vez em pedido; a política percentual de sinal é congelada; cobrança local
 e outbox são criadas; arte privada é versionada, confirmada e aprovada; webhook
 autenticado atualiza o sinal; a prontidão reserva materiais atomicamente sem consumir
@@ -171,6 +171,8 @@ audit_events=45
 | Consulta somente leitura no banco `north` | 0 | Migração Sprint 003 ausente e tabela `orders` inexistente. |
 | `git diff --cached --check` | 0 | Nenhum erro de whitespace. |
 | `git commit -m "feat: implement sprint 003 order readiness flow"` | 0 | Commit `5a6db44`, 42 arquivos, 4.689 inserções e 27 remoções. |
+| `git commit -m "docs: add sprint 003 partial handoff"` | 0 | Commit documental `4d2b006`. |
+| `git push -u origin sprint-003-pedido-arte-sinal-reserva` | 0 | Branch criada no GitHub sem merge nem force push. |
 
 ### 5. Matriz de aceite
 
