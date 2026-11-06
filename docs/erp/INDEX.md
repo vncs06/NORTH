@@ -54,8 +54,10 @@ histórico.
 - Perguntas documentadas: 70.
 - Pendência jurídica: Q-052, política definitiva de retenção/eliminação.
 - Arquitetura-base: definida em ADR-015 e ADR-016.
-- Implementação: ainda não iniciada.
-- Sprint autorizado para planejamento/execução: Sprint 001.
+- Implementação: M1 concluído no commit `013bc8d`; Sprint 001 formalmente aceito
+  em 2026-11-05.
+- Sprint autorizado para planejamento/execução: Sprint 002 — catálogo, ficha técnica,
+  precificação e orçamento versionado.
 
 ## Regra de atualização
 

@@ -192,8 +192,63 @@ th {
   display: grid;
   gap: 1rem;
 }
+.subgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.card {
+  border: 1px solid #dbe4df;
+  border-radius: 10px;
+  padding: 1rem;
+  background: #fbfdfc;
+}
+.card h2,
+.card h3 {
+  margin-top: 0;
+}
+.status {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  background: #e8efeb;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.status.issued,
+.status.active {
+  color: #155b3b;
+  background: #dff3e8;
+}
+.warning-row {
+  background: #fff8dd;
+}
+.no-print {
+  display: initial;
+}
 code {
   overflow-wrap: anywhere;
+}
+@media print {
+  .topbar,
+  .no-print,
+  button,
+  .button {
+    display: none !important;
+  }
+  body,
+  :root {
+    background: white;
+  }
+  main {
+    width: 100%;
+    margin: 0;
+  }
+  .panel {
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+  }
 }
 @media (max-width: 680px) {
   .topbar {

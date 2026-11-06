@@ -1,8 +1,9 @@
 # NORTH ERP
 
-Incremento vertical do Sprint 001: instalação de empresa única, autenticação local,
-gestão de usuários, cadastro de materiais, histórico de custo, razão imutável de
-estoque, projeção de saldo e auditoria operacional.
+Incrementos verticais dos Sprints 001 e 002: instalação de empresa única,
+autenticação local, gestão de usuários, razão imutável de estoque, clientes,
+catálogo configurável, fichas técnicas versionadas, precificação explicável e
+orçamentos imutáveis com revisão explícita.
 
 ## Requisitos
 
@@ -68,6 +69,7 @@ npm run db:test:prepare
 npm run db:test:migrate
 npm run db:test:reset
 npm run db:test:bootstrap
+npm run db:test:verify-sprint-002-migration
 npm run test:integration
 npm run test:e2e
 ```
@@ -100,6 +102,18 @@ npm audit --omit=dev
 mesmas travas e também exige portas E2E exclusivas. As proteções podem ser verificadas
 isoladamente com `npm run test:database-safety`.
 
+## Catálogo e orçamento
+
+Após autenticar, o menu oferece clientes, catálogo, fichas, preços e orçamentos. O
+gestor configura produtos, variantes, técnicas, fichas e políticas; gestor e
+funcionário podem cadastrar clientes, simular e emitir orçamentos dentro dos limites
+de desconto aplicáveis. A emissão persiste custos, consumo, disponibilidade, fórmula
+e política usados. Alterações posteriores só entram em uma revisão explícita.
+
+O consumo mostrado no orçamento é demanda prevista: ele não cria movimento nem
+reserva estoque. A tela de detalhe possui uma versão de impressão pelo navegador;
+PDF, pedido, arte, cobrança, Asaas e reserva entram em incrementos posteriores.
+
 ## Arquitetura e segurança
 
 - monorepo npm com `apps/web`, `apps/api`, `apps/worker` e pacotes compartilhados;
@@ -110,7 +124,10 @@ isoladamente com `npm run test:database-safety`.
   origem nas mutações;
 - movimentos de estoque e auditoria são append-only também no banco;
 - valores monetários são centavos inteiros e quantidades trafegam como strings
-  decimais exatas com até seis casas.
+  decimais exatas com até seis casas;
+- snapshots emitidos e versões ativas/arquivadas são protegidos contra sobrescrita
+  por constraints e triggers, além das invariantes da API.
 
 Esta entrega não declara prontidão de produção: recuperação de senha, MFA, control
-plane global e política jurídica de retenção permanecem fora do Sprint 001.
+plane global e política jurídica de retenção permanecem pendentes; pedido, arte,
+Asaas e reserva de estoque não fazem parte do Sprint 002.

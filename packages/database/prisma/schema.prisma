@@ -20,18 +20,18 @@ model Installation {
 }
 
 model User {
-  id             String   @id @db.Uuid
-  name           String
-  emailNormalized String  @unique @map("email_normalized")
-  passwordHash   String   @map("password_hash")
-  role           String
-  status         String
-  sessionVersion Int      @map("session_version")
-  createdBy      String?  @map("created_by") @db.Uuid
-  disabledBy     String?  @map("disabled_by") @db.Uuid
-  disabledAt     DateTime? @map("disabled_at") @db.Timestamptz(6)
-  createdAt      DateTime @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime @map("updated_at") @db.Timestamptz(6)
+  id              String    @id @db.Uuid
+  name            String
+  emailNormalized String    @unique @map("email_normalized")
+  passwordHash    String    @map("password_hash")
+  role            String
+  status          String
+  sessionVersion  Int       @map("session_version")
+  createdBy       String?   @map("created_by") @db.Uuid
+  disabledBy      String?   @map("disabled_by") @db.Uuid
+  disabledAt      DateTime? @map("disabled_at") @db.Timestamptz(6)
+  createdAt       DateTime  @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @map("updated_at") @db.Timestamptz(6)
 
   @@map("users")
 }
@@ -54,3 +54,279 @@ model Material {
   @@map("materials")
 }
 
+model Customer {
+  id                    String   @id @db.Uuid
+  type                  String
+  displayName           String   @map("display_name")
+  normalizedDisplayName String   @map("normalized_display_name")
+  businessName          String?  @map("business_name")
+  email                 String?
+  phone                 String?
+  operationalNote       String?  @map("operational_note")
+  status                String
+  version               Int
+  createdBy             String   @map("created_by") @db.Uuid
+  updatedBy             String   @map("updated_by") @db.Uuid
+  createdAt             DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@map("customers")
+}
+
+model Product {
+  id             String   @id @db.Uuid
+  code           String
+  normalizedCode String   @unique @map("normalized_code")
+  name           String
+  description    String?
+  status         String
+  version        Int
+  createdBy      String   @map("created_by") @db.Uuid
+  updatedBy      String   @map("updated_by") @db.Uuid
+  createdAt      DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@map("products")
+}
+
+model ProductVariant {
+  id             String   @id @db.Uuid
+  productId      String   @map("product_id") @db.Uuid
+  code           String
+  normalizedCode String   @map("normalized_code")
+  name           String
+  description    String?
+  status         String
+  version        Int
+  createdBy      String   @map("created_by") @db.Uuid
+  updatedBy      String   @map("updated_by") @db.Uuid
+  createdAt      DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([productId, normalizedCode])
+  @@map("product_variants")
+}
+
+model CustomizationTechnique {
+  id             String   @id @db.Uuid
+  code           String
+  normalizedCode String   @unique @map("normalized_code")
+  name           String
+  description    String?
+  status         String
+  version        Int
+  createdBy      String   @map("created_by") @db.Uuid
+  updatedBy      String   @map("updated_by") @db.Uuid
+  createdAt      DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@map("customization_techniques")
+}
+
+model CatalogCombination {
+  id          String   @id @db.Uuid
+  productId   String   @map("product_id") @db.Uuid
+  variantId   String   @map("variant_id") @db.Uuid
+  techniqueId String   @map("technique_id") @db.Uuid
+  status      String
+  version     Int
+  createdBy   String   @map("created_by") @db.Uuid
+  updatedBy   String   @map("updated_by") @db.Uuid
+  createdAt   DateTime @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([productId, variantId, techniqueId])
+  @@map("catalog_combinations")
+}
+
+model TechnicalSheet {
+  id              String    @id @db.Uuid
+  combinationId   String    @map("combination_id") @db.Uuid
+  versionNumber   Int       @map("version_number")
+  recordVersion   Int       @map("record_version")
+  status          String
+  yieldQuantity   Decimal   @map("yield_quantity") @db.Decimal(18, 6)
+  lossBps         Int       @map("loss_bps")
+  technicalNote   String?   @map("technical_note")
+  previousSheetId String?   @map("previous_sheet_id") @db.Uuid
+  createdBy       String    @map("created_by") @db.Uuid
+  activatedBy     String?   @map("activated_by") @db.Uuid
+  activatedAt     DateTime? @map("activated_at") @db.Timestamptz(6)
+  archivedAt      DateTime? @map("archived_at") @db.Timestamptz(6)
+  createdAt       DateTime  @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([combinationId, versionNumber])
+  @@map("technical_sheets")
+}
+
+model TechnicalSheetComponent {
+  id               String   @id @db.Uuid
+  technicalSheetId String   @map("technical_sheet_id") @db.Uuid
+  materialId       String   @map("material_id") @db.Uuid
+  quantity         Decimal  @db.Decimal(18, 6)
+  unit             String
+  displayOrder     Int      @map("display_order")
+  createdAt        DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@unique([technicalSheetId, materialId])
+  @@map("technical_sheet_components")
+}
+
+model PricingPolicy {
+  id            String    @id @db.Uuid
+  versionNumber Int       @unique @map("version_number")
+  status        String
+  method        String
+  rateBps       Int       @map("rate_bps")
+  effectiveAt   DateTime  @map("effective_at") @db.Timestamptz(6)
+  createdBy     String    @map("created_by") @db.Uuid
+  archivedAt    DateTime? @map("archived_at") @db.Timestamptz(6)
+  createdAt     DateTime  @map("created_at") @db.Timestamptz(6)
+
+  @@map("pricing_policies")
+}
+
+model DiscountPolicy {
+  id               String   @id @db.Uuid
+  pricingPolicyId  String   @unique @map("pricing_policy_id") @db.Uuid
+  employeeLimitBps Int      @map("employee_limit_bps")
+  managerLimitBps  Int      @map("manager_limit_bps")
+  status           String
+  effectiveAt      DateTime @map("effective_at") @db.Timestamptz(6)
+  createdBy        String   @map("created_by") @db.Uuid
+  createdAt        DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@map("discount_policies")
+}
+
+model DiscountPolicyOption {
+  id               String   @id @db.Uuid
+  discountPolicyId String   @map("discount_policy_id") @db.Uuid
+  discountBps      Int      @map("discount_bps")
+  displayOrder     Int      @map("display_order")
+  createdAt        DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@unique([discountPolicyId, discountBps])
+  @@unique([discountPolicyId, displayOrder])
+  @@map("discount_policy_options")
+}
+
+model PricingComponent {
+  id                String   @id @db.Uuid
+  pricingPolicyId   String   @map("pricing_policy_id") @db.Uuid
+  name              String
+  type              String
+  amountCents       BigInt?  @map("amount_cents")
+  rateBps           Int?     @map("rate_bps")
+  status            String
+  displayOrder      Int      @map("display_order")
+  includeInCostBase Boolean  @map("include_in_cost_base")
+  createdBy         String   @map("created_by") @db.Uuid
+  createdAt         DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@map("pricing_components")
+}
+
+model Quote {
+  id                           String    @id @db.Uuid
+  commercialNumber             String    @unique @map("commercial_number")
+  revisionNumber               Int       @map("revision_number")
+  previousQuoteId              String?   @map("previous_quote_id") @db.Uuid
+  rootQuoteId                  String?   @map("root_quote_id") @db.Uuid
+  customerId                   String    @map("customer_id") @db.Uuid
+  status                       String
+  version                      Int
+  pricingPolicyId              String?   @map("pricing_policy_id") @db.Uuid
+  discountPolicyId             String?   @map("discount_policy_id") @db.Uuid
+  pricingMethod                String?   @map("pricing_method")
+  pricingRateBps               Int?      @map("pricing_rate_bps")
+  discountBps                  Int?      @map("discount_bps")
+  materialCostCents            BigInt?   @map("material_cost_cents")
+  additionalCostCents          BigInt?   @map("additional_cost_cents")
+  costBaseCents                BigInt?   @map("cost_base_cents")
+  suggestedPriceCents          BigInt?   @map("suggested_price_cents")
+  discountCents                BigInt?   @map("discount_cents")
+  suggestedFinalCents          BigInt?   @map("suggested_final_cents")
+  manualFinalCents             BigInt?   @map("manual_final_cents")
+  manualAdjustmentReason       String?   @map("manual_adjustment_reason")
+  finalPriceCents              BigInt?   @map("final_price_cents")
+  customerTypeSnapshot         String?   @map("customer_type_snapshot")
+  customerDisplayNameSnapshot  String?   @map("customer_display_name_snapshot")
+  customerBusinessNameSnapshot String?   @map("customer_business_name_snapshot")
+  snapshotJson                 Json?     @map("snapshot_json")
+  createdBy                    String    @map("created_by") @db.Uuid
+  updatedBy                    String    @map("updated_by") @db.Uuid
+  issuedBy                     String?   @map("issued_by") @db.Uuid
+  issuedAt                     DateTime? @map("issued_at") @db.Timestamptz(6)
+  cancelledBy                  String?   @map("cancelled_by") @db.Uuid
+  cancelledAt                  DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  cancellationReason           String?   @map("cancellation_reason")
+  createdAt                    DateTime  @map("created_at") @db.Timestamptz(6)
+  updatedAt                    DateTime  @map("updated_at") @db.Timestamptz(6)
+
+  @@map("quotes")
+}
+
+model QuoteItem {
+  id                    String   @id @db.Uuid
+  quoteId               String   @map("quote_id") @db.Uuid
+  combinationId         String   @map("combination_id") @db.Uuid
+  requestedQuantity     Decimal  @map("requested_quantity") @db.Decimal(18, 6)
+  displayOrder          Int      @map("display_order")
+  productCodeSnapshot   String?  @map("product_code_snapshot")
+  productNameSnapshot   String?  @map("product_name_snapshot")
+  variantCodeSnapshot   String?  @map("variant_code_snapshot")
+  variantNameSnapshot   String?  @map("variant_name_snapshot")
+  techniqueCodeSnapshot String?  @map("technique_code_snapshot")
+  techniqueNameSnapshot String?  @map("technique_name_snapshot")
+  technicalSheetId      String?  @map("technical_sheet_id") @db.Uuid
+  technicalSheetVersion Int?     @map("technical_sheet_version")
+  yieldQuantitySnapshot Decimal? @map("yield_quantity_snapshot") @db.Decimal(18, 6)
+  lossBpsSnapshot       Int?     @map("loss_bps_snapshot")
+  materialCostCents     BigInt?  @map("material_cost_cents")
+  insufficientStock     Boolean? @map("insufficient_stock")
+  createdAt             DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@map("quote_items")
+}
+
+model QuoteMaterialSnapshot {
+  id                String   @id @db.Uuid
+  quoteItemId       String   @map("quote_item_id") @db.Uuid
+  materialId        String   @map("material_id") @db.Uuid
+  materialCode      String   @map("material_code")
+  materialName      String   @map("material_name")
+  unit              String
+  componentQuantity Decimal  @map("component_quantity") @db.Decimal(18, 6)
+  baseConsumption   Decimal  @map("base_consumption") @db.Decimal(18, 6)
+  lossQuantity      Decimal  @map("loss_quantity") @db.Decimal(18, 6)
+  totalConsumption  Decimal  @map("total_consumption") @db.Decimal(18, 6)
+  lossBps           Int      @map("loss_bps")
+  unitCostCents     BigInt   @map("unit_cost_cents")
+  totalCostCents    BigInt   @map("total_cost_cents")
+  physicalQuantity  Decimal  @map("physical_quantity") @db.Decimal(18, 6)
+  reservedQuantity  Decimal  @map("reserved_quantity") @db.Decimal(18, 6)
+  availableQuantity Decimal  @map("available_quantity") @db.Decimal(18, 6)
+  insufficientStock Boolean  @map("insufficient_stock")
+  materialCostId    String   @map("material_cost_id") @db.Uuid
+  createdAt         DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@map("quote_material_snapshots")
+}
+
+model QuotePricingComponentSnapshot {
+  id                 String   @id @db.Uuid
+  quoteId            String   @map("quote_id") @db.Uuid
+  pricingComponentId String   @map("pricing_component_id") @db.Uuid
+  name               String
+  type               String
+  amountCents        BigInt?  @map("amount_cents")
+  rateBps            Int?     @map("rate_bps")
+  calculatedCents    BigInt   @map("calculated_cents")
+  includeInCostBase  Boolean  @map("include_in_cost_base")
+  displayOrder       Int      @map("display_order")
+  createdAt          DateTime @map("created_at") @db.Timestamptz(6)
+
+  @@map("quote_pricing_component_snapshots")
+}

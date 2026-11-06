@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { api, ApiError, formatMoney, formatQuantity, message } from '../../../lib/api';
 
 interface Material {
@@ -30,6 +30,30 @@ export default function MaterialPage() {
   const [material, setMaterial] = useState<Material | null>(null);
   const [movements, setMovements] = useState<Movement[]>([]);
   const [error, setError] = useState('');
+  const [costSuccess, setCostSuccess] = useState('');
+  async function createCost(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError('');
+    setCostSuccess('');
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    try {
+      await api(`/materials/${id}/costs`, {
+        method: 'POST',
+        body: JSON.stringify({
+          amountCents: Math.round(Number(form.get('amount')) * 100),
+          effectiveAt: new Date(form.get('effectiveAt') as string).toISOString(),
+          reason: form.get('reason') || undefined,
+        }),
+      });
+      setCostSuccess('Novo custo vigente registrado sem alterar versões anteriores.');
+      const updated = await api<Material>(`/materials/${id}`);
+      setMaterial(updated);
+      formElement.reset();
+    } catch (caught) {
+      setError(message(caught));
+    }
+  }
   useEffect(() => {
     void (async () => {
       try {
@@ -86,6 +110,34 @@ export default function MaterialPage() {
           <strong>Mínimo:</strong> {formatQuantity(material.minimumStock, material.baseUnit)}
         </p>
         {material.description && <p>{material.description}</p>}
+      </section>
+      <section className="panel no-print">
+        <h2>Novo custo versionado</h2>
+        <p className="muted">Disponível ao gestor. Custos anteriores permanecem auditáveis.</p>
+        {costSuccess && <div className="success">{costSuccess}</div>}
+        <form className="grid" onSubmit={createCost}>
+          <div className="field">
+            <label htmlFor="amount">Valor unitário (R$)</label>
+            <input id="amount" name="amount" type="number" min="0" step="0.01" required />
+          </div>
+          <div className="field">
+            <label htmlFor="effectiveAt">Vigência</label>
+            <input
+              id="effectiveAt"
+              name="effectiveAt"
+              type="datetime-local"
+              defaultValue={new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+                .toISOString()
+                .slice(0, 16)}
+              required
+            />
+          </div>
+          <div className="field full">
+            <label htmlFor="reason">Motivo (opcional)</label>
+            <input id="reason" name="reason" maxLength={500} />
+          </div>
+          <button className="full">Registrar custo</button>
+        </form>
       </section>
       <section className="panel">
         <h2>Movimentos</h2>

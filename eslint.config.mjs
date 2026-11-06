@@ -10,6 +10,8 @@ export default tseslint.config(
       '**/.next-e2e/**',
       '**/dist/**',
       '**/coverage/**',
+      'playwright-report/**',
+      'test-results/**',
       '3E/**',
       'docs/**',
       'eslint.config.mjs',

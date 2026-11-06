@@ -17,18 +17,23 @@ export async function transaction<T>(
   operation: (client: DatabaseClient) => Promise<T>,
   isolation: 'READ COMMITTED' | 'SERIALIZABLE' = 'READ COMMITTED',
 ): Promise<T> {
-  const client = await pool.connect();
-  try {
-    await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
-    const result = await operation(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+  const attempts = isolation === 'SERIALIZABLE' ? 4 : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const client = await pool.connect();
+    try {
+      await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
+      const result = await operation(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      const retryable = (error as { code?: string }).code === '40001';
+      if (!retryable || attempt === attempts) throw error;
+    } finally {
+      client.release();
+    }
   }
+  throw new Error('SERIALIZABLE_TRANSACTION_RETRY_EXHAUSTED');
 }
 
 export async function closeDatabase(): Promise<void> {

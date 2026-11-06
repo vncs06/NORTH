@@ -8,13 +8,18 @@ financeiro e atendimento inteligente.
 
 ## Entregas verticais
 
-| Marco | Fluxo utilizável                                              | Dependências                     | Critérios de aceite                                          |
-| ----- | ------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------ |
-| M1    | Login -> material -> movimento -> saldo -> auditoria          | ADR-015/016; PostgreSQL          | Razão imutável, idempotência, papéis e concorrência testados |
-| M2    | Produto/ficha -> orçamento -> pedido -> arte+sinal -> reserva | M1; Asaas Sandbox                | Cálculo explicável e produção só libera com arte+sinal       |
-| M3    | Pedido -> consumo real -> produção -> qualidade/refação       | M2                               | Movimentos rastreáveis e sem consumo duplo                   |
-| M4    | Qualidade -> saldo final -> entrega -> financeiro progressivo | M3                               | Webhook conciliado, contas manuais e resultado por pedido    |
-| M5    | Meta -> IA/humano -> demanda/pedido integrado                 | M2-M4; onboarding Meta, IA e n8n | Webhook idempotente, orçamento de IA e transferência humana  |
+| Marco | Estado      | Fluxo utilizável                                                      | Dependências                     | Critérios de aceite                                             |
+| ----- | ----------- | --------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------- |
+| M1    | CONCLUÍDO   | Login -> material -> movimento -> saldo -> auditoria                  | ADR-015/016; PostgreSQL          | Razão imutável, idempotência, papéis e concorrência testados    |
+| M2A   | EM EXECUÇÃO | Produto/ficha -> cliente -> orçamento versionado                      | M1                               | Cálculo explicável, snapshot imutável e nenhuma reserva         |
+| M2B   | PLANEJADO   | Orçamento -> pedido -> arte+sinal -> reserva                          | M2A; Asaas Sandbox               | Produção só libera com arte+sinal; reserva rastreável           |
+| M3    | PLANEJADO   | Pedido -> consumo real -> produção -> qualidade/refação               | M2B                              | Movimentos rastreáveis e sem consumo duplo                      |
+| M4    | PLANEJADO   | Qualidade -> saldo final -> entrega -> financeiro progressivo         | M3                               | Webhook conciliado, contas manuais e resultado por pedido       |
+| M5    | PLANEJADO   | Meta -> IA/humano -> demanda/pedido integrado                         | M2-M4; onboarding Meta, IA e n8n | Webhook idempotente, orçamento de IA e transferência humana     |
+
+O escopo histórico de M2 foi dividido em M2A e M2B para reduzir risco transacional.
+M2A corresponde ao Sprint 002 e calcula apenas demanda prevista. Pedido, arte, sinal,
+Asaas e reserva permanecem no incremento seguinte.
 
 ## Riscos e decisões bloqueantes
 

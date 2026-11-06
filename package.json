@@ -35,6 +35,7 @@
     "db:test:validate": "cross-env NODE_ENV=test tsx packages/testing/src/validate-test-database.ts",
     "db:test:prepare": "cross-env NODE_ENV=test tsx packages/testing/src/prepare-test-database.ts",
     "db:test:migrate": "cross-env NODE_ENV=test tsx packages/testing/src/run-with-test-database.ts npm run db:migrate",
+    "db:test:verify-sprint-002-migration": "cross-env NODE_ENV=test tsx packages/testing/src/verify-sprint-002-migration.ts",
     "db:test:reset": "cross-env NODE_ENV=test tsx packages/testing/src/reset-database.ts",
     "db:test:bootstrap": "cross-env NODE_ENV=test BOOTSTRAP_COMPANY_NAME=Empresa_E2E BOOTSTRAP_TIMEZONE=America/Manaus BOOTSTRAP_MANAGER_NAME=Gestor_E2E BOOTSTRAP_MANAGER_EMAIL=gestor.e2e@example.test BOOTSTRAP_MANAGER_PASSWORD=E2ePassword123! tsx packages/testing/src/run-with-test-database.ts npm run db:bootstrap",
     "db:test:drop": "cross-env NODE_ENV=test tsx packages/testing/src/drop-test-database.ts",

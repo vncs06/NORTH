@@ -34,7 +34,12 @@ describe('Sprint 001 com PostgreSQL real', () => {
     return { agent, csrf: csrfFrom(response), userId: response.body.user.id as string };
   }
 
-  function mutate(agent: SuperAgentTest, csrf: string, method: 'post' | 'patch', path: string) {
+  function mutate(
+    agent: SuperAgentTest,
+    csrf: string,
+    method: 'post' | 'patch' | 'put',
+    path: string,
+  ) {
     return agent[method](path).set('origin', ORIGIN).set('x-csrf-token', csrf);
   }
 
@@ -327,6 +332,438 @@ describe('Sprint 001 com PostgreSQL real', () => {
     expect(second.body.nextCursor).toBeNull();
     const ids = [...first.body.items, ...second.body.items].map((item: { id: string }) => item.id);
     expect(new Set(ids).size).toBe(21);
+  });
+
+  it('executa catálogo, ficha, preço, orçamento imutável e revisão sem reservar estoque', async () => {
+    const manager = await login('gestor.integration@example.test', 'IntegrationPassword123!');
+    const employee = await login('operator@example.test', 'OperatorPassword123!');
+
+    const material = await mutate(manager.agent, manager.csrf, 'post', '/api/v1/materials')
+      .send({ code: 'S2-CANECA', name: 'Caneca branca 325 ml', baseUnit: 'un', minimumStock: '0' })
+      .expect(201);
+    const materialId = material.body.id as string;
+    await mutate(manager.agent, manager.csrf, 'post', `/api/v1/materials/${materialId}/costs`)
+      .send({ amountCents: 1000, effectiveAt: new Date(Date.now() - 1000).toISOString() })
+      .expect(201);
+    await mutate(manager.agent, manager.csrf, 'post', `/api/v1/materials/${materialId}/movements`)
+      .set('idempotency-key', randomUUID())
+      .send({ type: 'OPENING_BALANCE', quantity: '2', confirmNegative: false })
+      .expect(201);
+
+    await mutate(employee.agent, employee.csrf, 'post', '/api/v1/catalog/products')
+      .send({ code: 'NEGADO', name: 'Não permitido' })
+      .expect(403);
+    const product = await mutate(manager.agent, manager.csrf, 'post', '/api/v1/catalog/products')
+      .send({ code: 'CANECA', name: 'Caneca personalizada' })
+      .expect(201);
+    const variant = await mutate(manager.agent, manager.csrf, 'post', '/api/v1/catalog/variants')
+      .send({ productId: product.body.id, code: '325ML', name: '325 ml branca' })
+      .expect(201);
+    const technique = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      '/api/v1/catalog/techniques',
+    )
+      .send({ code: 'SUB', name: 'Sublimação' })
+      .expect(201);
+    const combination = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      '/api/v1/catalog/combinations',
+    )
+      .send({
+        productId: product.body.id,
+        variantId: variant.body.id,
+        techniqueId: technique.body.id,
+      })
+      .expect(201);
+
+    const catalogUpdates = await Promise.all([
+      mutate(
+        manager.agent,
+        manager.csrf,
+        'patch',
+        `/api/v1/catalog/products/${product.body.id as string}`,
+      ).send({ version: 1, name: 'Caneca personalizada A' }),
+      mutate(
+        manager.agent,
+        manager.csrf,
+        'patch',
+        `/api/v1/catalog/products/${product.body.id as string}`,
+      ).send({ version: 1, name: 'Caneca personalizada B' }),
+    ]);
+    expect(catalogUpdates.map((response) => response.status).sort()).toEqual([200, 409]);
+
+    const sheet = await mutate(manager.agent, manager.csrf, 'post', '/api/v1/technical-sheets')
+      .send({
+        combinationId: combination.body.id,
+        yieldQuantity: '1',
+        lossBps: 500,
+        technicalNote: 'Uma caneca por impressão',
+        components: [{ materialId, quantity: '1', unit: 'un' }],
+      })
+      .expect(201);
+    await mutate(
+      employee.agent,
+      employee.csrf,
+      'post',
+      `/api/v1/technical-sheets/${sheet.body.id}/activate`,
+    )
+      .set('idempotency-key', randomUUID())
+      .send({})
+      .expect(403);
+    const activationKey = randomUUID();
+    await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      `/api/v1/technical-sheets/${sheet.body.id}/activate`,
+    )
+      .set('idempotency-key', activationKey)
+      .send({})
+      .expect(201);
+
+    const sheetRevisionA = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      `/api/v1/technical-sheets/${sheet.body.id}/revise`,
+    )
+      .set('idempotency-key', randomUUID())
+      .send({})
+      .expect(201);
+    const sheetRevisionB = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      `/api/v1/technical-sheets/${sheet.body.id}/revise`,
+    )
+      .set('idempotency-key', randomUUID())
+      .send({})
+      .expect(201);
+    const sheetActivations = await Promise.all([
+      mutate(
+        manager.agent,
+        manager.csrf,
+        'post',
+        `/api/v1/technical-sheets/${sheetRevisionA.body.id as string}/activate`,
+      )
+        .set('idempotency-key', randomUUID())
+        .send({}),
+      mutate(
+        manager.agent,
+        manager.csrf,
+        'post',
+        `/api/v1/technical-sheets/${sheetRevisionB.body.id as string}/activate`,
+      )
+        .set('idempotency-key', randomUUID())
+        .send({}),
+    ]);
+    expect(sheetActivations.map((response) => response.status)).toEqual([201, 201]);
+    const activeSheetCount = await pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM technical_sheets
+       WHERE combination_id=$1 AND status='ACTIVE'`,
+      [combination.body.id],
+    );
+    expect(activeSheetCount.rows[0]!.count).toBe(1);
+    await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      `/api/v1/technical-sheets/${sheet.body.id}/activate`,
+    )
+      .set('idempotency-key', activationKey)
+      .send({})
+      .expect(201);
+
+    await mutate(manager.agent, manager.csrf, 'put', '/api/v1/pricing/policy')
+      .set('idempotency-key', randomUUID())
+      .send({
+        method: 'MARKUP',
+        rateBps: 5000,
+        employeeDiscountLimitBps: 500,
+        managerDiscountLimitBps: 1500,
+        discountOptionsBps: [0, 500, 1000, 1500],
+        effectiveAt: new Date(Date.now() - 1000).toISOString(),
+        components: [
+          {
+            name: 'Mão de obra',
+            type: 'FIXED_UNIT',
+            amountCents: 200,
+            status: 'ACTIVE',
+            displayOrder: 0,
+            includeInCostBase: true,
+          },
+        ],
+      })
+      .expect(200);
+    const employeePolicy = await employee.agent.get('/api/v1/pricing/policy').expect(200);
+    expect(employeePolicy.body.managerDiscountLimitBps).toBeUndefined();
+    expect(employeePolicy.body.components[0].amountCents).toBeUndefined();
+    expect(employeePolicy.body.discountOptionsBps).toEqual([0, 500]);
+    const employeeDiscounts = await employee.agent.get('/api/v1/pricing/discounts').expect(200);
+    expect(employeeDiscounts.body).toMatchObject({
+      employeeLimitBps: 500,
+      optionsBps: [0, 500],
+    });
+    expect(employeeDiscounts.body.managerLimitBps).toBeUndefined();
+    const employeeComponents = await employee.agent.get('/api/v1/pricing/components').expect(200);
+    expect(employeeComponents.body.items[0].amountCents).toBeUndefined();
+
+    const customer = await mutate(employee.agent, employee.csrf, 'post', '/api/v1/customers')
+      .send({ type: 'PERSON', displayName: 'Cliente Sprint Dois', email: 'cliente@example.test' })
+      .expect(201);
+    await mutate(
+      employee.agent,
+      employee.csrf,
+      'patch',
+      `/api/v1/customers/${customer.body.id as string}`,
+    )
+      .send({ version: 1, phone: '+55 92 90000-0000', email: 'privado@example.test' })
+      .expect(200);
+
+    const noCostMaterial = await mutate(manager.agent, manager.csrf, 'post', '/api/v1/materials')
+      .send({ code: 'S2-SEM-CUSTO', name: 'Material sem custo', baseUnit: 'un', minimumStock: '0' })
+      .expect(201);
+    const noCostProduct = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      '/api/v1/catalog/products',
+    )
+      .send({ code: 'SEM-CUSTO', name: 'Produto sem custo' })
+      .expect(201);
+    const noCostVariant = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      '/api/v1/catalog/variants',
+    )
+      .send({ productId: noCostProduct.body.id, code: 'PADRAO', name: 'Padrão' })
+      .expect(201);
+    const noCostCombination = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      '/api/v1/catalog/combinations',
+    )
+      .send({
+        productId: noCostProduct.body.id,
+        variantId: noCostVariant.body.id,
+        techniqueId: technique.body.id,
+      })
+      .expect(201);
+    const noCostSheet = await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      '/api/v1/technical-sheets',
+    )
+      .send({
+        combinationId: noCostCombination.body.id,
+        yieldQuantity: '1',
+        lossBps: 0,
+        components: [{ materialId: noCostMaterial.body.id, quantity: '1', unit: 'un' }],
+      })
+      .expect(201);
+    await mutate(
+      manager.agent,
+      manager.csrf,
+      'post',
+      `/api/v1/technical-sheets/${noCostSheet.body.id as string}/activate`,
+    )
+      .set('idempotency-key', randomUUID())
+      .send({})
+      .expect(201);
+    const noCostQuote = await mutate(employee.agent, employee.csrf, 'post', '/api/v1/quotes')
+      .send({
+        customerId: customer.body.id,
+        items: [{ combinationId: noCostCombination.body.id, quantity: '1' }],
+      })
+      .expect(201);
+    await mutate(
+      employee.agent,
+      employee.csrf,
+      'post',
+      `/api/v1/quotes/${noCostQuote.body.id as string}/issue`,
+    )
+      .set('idempotency-key', randomUUID())
+      .send({ discountBps: 0 })
+      .expect(422)
+      .expect((response) => expect(response.body.code).toBe('MATERIAL_COST_MISSING'));
+    const failedIssue = await pool.query<{ status: string; snapshots: number }>(
+      `SELECT q.status,
+              (SELECT count(*)::int FROM quote_material_snapshots s
+               JOIN quote_items i ON i.id=s.quote_item_id WHERE i.quote_id=q.id) AS snapshots
+       FROM quotes q WHERE q.id=$1`,
+      [noCostQuote.body.id],
+    );
+    expect(failedIssue.rows[0]).toEqual({ status: 'DRAFT', snapshots: 0 });
+
+    const quote = await mutate(employee.agent, employee.csrf, 'post', '/api/v1/quotes')
+      .send({
+        customerId: customer.body.id,
+        items: [{ combinationId: combination.body.id, quantity: '3' }],
+      })
+      .expect(201);
+    const quoteId = quote.body.id as string;
+
+    await mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${quoteId}/simulate`)
+      .send({ discountBps: 501 })
+      .expect(422)
+      .expect((response) => expect(response.body.code).toBe('DISCOUNT_LIMIT_EXCEEDED'));
+    await mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${quoteId}/simulate`)
+      .send({ discountBps: 300 })
+      .expect(422)
+      .expect((response) => expect(response.body.code).toBe('DISCOUNT_OPTION_NOT_AVAILABLE'));
+    await mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${quoteId}/simulate`)
+      .send({ discountBps: 0, manualFinalPriceCents: 5000, manualReason: 'Tentativa' })
+      .expect(403)
+      .expect((response) => expect(response.body.code).toBe('MANUAL_PRICE_REQUIRES_MANAGER'));
+
+    const simulation = await mutate(
+      employee.agent,
+      employee.csrf,
+      'post',
+      `/api/v1/quotes/${quoteId}/simulate`,
+    )
+      .send({ discountBps: 500 })
+      .expect(201);
+    expect(simulation.body).toMatchObject({
+      materialCostCents: 3150,
+      additionalCostCents: 600,
+      costBaseCents: 3750,
+      suggestedPriceCents: 5625,
+      discountCents: 281,
+      finalPriceCents: 5344,
+    });
+    expect(simulation.body.items[0].materials[0]).toMatchObject({
+      baseConsumption: '3',
+      lossQuantity: '0.15',
+      totalConsumption: '3.15',
+      insufficientStock: true,
+    });
+
+    const stockBefore = await pool.query(
+      `SELECT physical_quantity::text AS physical,reserved_quantity::text AS reserved,
+              (SELECT count(*)::int FROM inventory_movements WHERE material_id=$1) AS movements
+       FROM inventory_balances WHERE material_id=$1`,
+      [materialId],
+    );
+    const issueKey = randomUUID();
+    const issued = await mutate(
+      employee.agent,
+      employee.csrf,
+      'post',
+      `/api/v1/quotes/${quoteId}/issue`,
+    )
+      .set('idempotency-key', issueKey)
+      .send({ discountBps: 500 })
+      .expect(201);
+    expect(issued.body).toMatchObject({ status: 'ISSUED', finalPriceCents: '5344' });
+    const replay = await mutate(
+      employee.agent,
+      employee.csrf,
+      'post',
+      `/api/v1/quotes/${quoteId}/issue`,
+    )
+      .set('idempotency-key', issueKey)
+      .send({ discountBps: 500 })
+      .expect(201);
+    expect(replay.body.id).toBe(quoteId);
+    await mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${quoteId}/issue`)
+      .set('idempotency-key', issueKey)
+      .send({ discountBps: 0 })
+      .expect(409)
+      .expect((response) => expect(response.body.code).toBe('IDEMPOTENCY_KEY_REUSED'));
+
+    const stockAfter = await pool.query(
+      `SELECT physical_quantity::text AS physical,reserved_quantity::text AS reserved,
+              (SELECT count(*)::int FROM inventory_movements WHERE material_id=$1) AS movements
+       FROM inventory_balances WHERE material_id=$1`,
+      [materialId],
+    );
+    expect(stockAfter.rows[0]).toEqual(stockBefore.rows[0]);
+    await expect(
+      pool.query('UPDATE quotes SET final_price_cents=1 WHERE id=$1', [quoteId]),
+    ).rejects.toMatchObject({ code: '55000' });
+
+    await mutate(manager.agent, manager.csrf, 'post', `/api/v1/materials/${materialId}/costs`)
+      .send({ amountCents: 1400, effectiveAt: new Date().toISOString(), reason: 'Novo custo' })
+      .expect(201);
+    await mutate(manager.agent, manager.csrf, 'put', '/api/v1/pricing/policy')
+      .set('idempotency-key', randomUUID())
+      .send({
+        method: 'MARGIN',
+        rateBps: 4000,
+        employeeDiscountLimitBps: 300,
+        managerDiscountLimitBps: 1000,
+        discountOptionsBps: [0, 300, 1000],
+        effectiveAt: new Date().toISOString(),
+        components: [],
+      })
+      .expect(200);
+    const unchanged = await employee.agent.get(`/api/v1/quotes/${quoteId}`).expect(200);
+    expect(unchanged.body).toMatchObject({ finalPriceCents: '5344', materialCostCents: '3150' });
+
+    const revisionKey = randomUUID();
+    const [revisionA, revisionB] = await Promise.all([
+      mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${quoteId}/revise`)
+        .set('idempotency-key', revisionKey)
+        .send({}),
+      mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${quoteId}/revise`)
+        .set('idempotency-key', revisionKey)
+        .send({}),
+    ]);
+    expect([revisionA.status, revisionB.status]).toEqual([201, 201]);
+    expect(revisionA.body.id).toBe(revisionB.body.id);
+    const revisionId = revisionA.body.id as string;
+    const revisedSimulation = await mutate(
+      employee.agent,
+      employee.csrf,
+      'post',
+      `/api/v1/quotes/${revisionId}/simulate`,
+    )
+      .send({ discountBps: 300 })
+      .expect(201);
+    expect(revisedSimulation.body.materialCostCents).toBe(4410);
+    await mutate(employee.agent, employee.csrf, 'post', `/api/v1/quotes/${revisionId}/issue`)
+      .set('idempotency-key', randomUUID())
+      .send({ discountBps: 300 })
+      .expect(201);
+    await employee.agent
+      .get(`/api/v1/quotes/${quoteId}`)
+      .expect(200)
+      .expect((response) => expect(response.body.status).toBe('SUPERSEDED'));
+
+    const concurrentQuotes = await Promise.all([
+      mutate(employee.agent, employee.csrf, 'post', '/api/v1/quotes').send({
+        customerId: customer.body.id,
+        items: [{ combinationId: combination.body.id, quantity: '1' }],
+      }),
+      mutate(employee.agent, employee.csrf, 'post', '/api/v1/quotes').send({
+        customerId: customer.body.id,
+        items: [{ combinationId: combination.body.id, quantity: '1' }],
+      }),
+    ]);
+    expect(concurrentQuotes.map((response) => response.status)).toEqual([201, 201]);
+    expect(concurrentQuotes[0].body.commercialNumber).not.toBe(
+      concurrentQuotes[1].body.commercialNumber,
+    );
+
+    const audit = await manager.agent.get('/api/v1/audit').expect(200);
+    expect(audit.body.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: 'TECHNICAL_SHEET_ACTIVATED' }),
+        expect.objectContaining({ action: 'PRICING_POLICY_ACTIVATED' }),
+        expect.objectContaining({ action: 'QUOTE_ISSUED' }),
+        expect.objectContaining({ action: 'QUOTE_REVISION_CREATED' }),
+      ]),
+    );
+    expect(JSON.stringify(audit.body)).not.toMatch(/cliente@example\.test/);
+    expect(JSON.stringify(audit.body)).not.toMatch(/privado@example\.test|90000-0000/);
   });
 
   it('rejeita desativação do último gestor', async () => {
