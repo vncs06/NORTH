@@ -192,7 +192,7 @@ audit_events=45
 | Política de sinal por valor fixo | FALHOU | Modo fixo não foi implementado. |
 | Meios habilitados fazem parte da política versionada | FALHOU | Política não persiste lista de meios. |
 | Sinal usa `HALF_UP` e centavos | PASSOU | Domínio unitário com `bigint`; exemplo 10.001 × 33,33% = 3.333 centavos. |
-| Sinal não supera total sem decisão explícita | PARCIAL | Implementação limita automaticamente ao total; não registra decisão específica. |
+| Sinal não supera total sem decisão explícita | FALHOU | Implementação limita automaticamente ao total; não registra decisão específica. |
 | Estados detalhados do pedido refletem arte e sinal separadamente | FALHOU | Foram usados estados equivalentes mais agregados: `PENDING_READINESS`, `READY_FOR_PRODUCTION`, `FINANCIAL_REVIEW`, `CANCELLED`. |
 | Toda transição possui histórico, ator, correlação e motivo | PASSOU | `order_state_history` append-only. |
 | `READY_FOR_PRODUCTION` exige arte, sinal/decisão e reserva | PASSOU | Reavaliação transacional e E2E. |
@@ -207,14 +207,14 @@ audit_events=45
 | CPF/CNPJ normalizado, cifrado, HMAC e mascarado | PASSOU | Persistência protegida e auditoria somente com últimos quatro dígitos. |
 | CPF/CNPJ validado por dígitos verificadores | FALHOU | Contrato valida apenas 11/14 dígitos. |
 | Vínculo Asaas evita cliente duplicado | PASSOU | Unicidade por cliente/ambiente e reuse no worker. |
-| Timeout inconclusivo é reconciliado antes de repetir | PARCIAL | Vínculo/external reference existem; stub não exercita timeout/reconciliação. |
+| Timeout inconclusivo é reconciliado antes de repetir | FALHOU | Vínculo/external reference existem; stub não exercita timeout/reconciliação. |
 | Obrigação financeira local precede chamada externa | PASSOU | `payment_charges` + outbox antes do worker. |
 | Criação de cobrança não equivale a pagamento | PASSOU | Começa `PENDING_CREATION`; somente webhook confirma. |
 | Pix e boleto | PASSOU | Contrato, UI, gateway e stub. |
 | Cartão por experiência hospedada sem capturar cartão | FALHOU | `CREDIT_CARD` não está disponível. |
 | Data de vencimento é explícita | PASSOU | Obrigatória no contrato da cobrança. |
 | Outbox usa lock, backoff, limite e erro sanitizado | PASSOU | `FOR UPDATE SKIP LOCKED`, tentativas e próxima execução. |
-| Duas solicitações concorrentes de cobrança não duplicam | PARCIAL | UNIQUE/idempotência existem; concorrência simultânea não foi testada. |
+| Duas solicitações concorrentes de cobrança não duplicam | FALHOU | UNIQUE/idempotência existem; concorrência simultânea não foi testada. |
 | Webhook não usa sessão/CSRF e exige token próprio | PASSOU | Controller dedicado e comparação constante. |
 | Evento é persistido antes do HTTP 200 | PASSOU | Inbox é gravada antes do retorno e testada. |
 | Webhook duplicado não duplica pagamento/reserva | PASSOU | ID externo UNIQUE, worker idempotente e E2E repetido. |
@@ -231,14 +231,14 @@ audit_events=45
 | Gestor confirma saldo negativo com motivo | PASSOU | Segundo fluxo E2E e auditoria. |
 | Falha em um material reverte toda reserva | PASSOU | Uma transação para todos os materiais. |
 | Cancelamento gerencial libera por `RELEASE` | PASSOU | Integração confere delta inverso e histórico preservado. |
-| Cancelamento com pagamento abre decisão sem reembolso automático | PARCIAL | Não há reembolso automático; decisão financeira completa requer ampliação. |
+| Cancelamento com pagamento abre decisão sem reembolso automático | FALHOU | Não há reembolso automático; decisão financeira completa requer ampliação. |
 | Matriz de autorização aplicada na API | PASSOU | Gestor controla política, integração, aprovação, exceções e cancelamento; integração retorna `403`. |
 | Logs/auditoria não expõem documento ou segredos | PASSOU | Sanitização específica e inspeção de ciphertext. |
 | Interface cobre lista, detalhe, checklist, timeline, arte, sinal e reserva | PASSOU | Rotas web compiladas e E2E. |
 | Interface cobre taxas, rotação/desconexão e histórico completo | FALHOU | Superfície complementar Asaas não implementada. |
 | Stub simula autenticação, cliente, cobrança e confirmação | PASSOU | Stub determinístico local usado em integração/E2E. |
 | Stub simula taxas, timeout, 400/429/500 e todos os eventos | FALHOU | Cenários amplos exigidos não foram implementados. |
-| Concorrência completa do item 19 | PARCIAL | Conversão e deduplicação foram testadas; as demais combinações simultâneas não. |
+| Concorrência completa do item 19 | FALHOU | Conversão e deduplicação foram testadas; as demais combinações simultâneas não. |
 | Migração funciona desde vazio e sobre dados anteriores | PASSOU | Verificador dedicado com contagens preservadas. |
 | Rollback de transação | PASSOU | Inserção revertida e contagem zero. |
 | Backup e restauração | PASSOU | Banco temporário restaurado e removido. |
