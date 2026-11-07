@@ -13,7 +13,9 @@ O fluxo orçamento -> pedido -> sinal -> arte -> Webhook -> reserva ->
 `READY_FOR_PRODUCTION` continua executável. Foram aprovados 33 testes unitários, 9
 testes de segurança do banco, 23 testes de integração PostgreSQL e 3 fluxos E2E. A
 migração corretiva, o backup/restauração e o build passaram. O commit corretivo é
-`97a3962` (`fix: complete sprint 003 Asaas correction`).
+`97a3962` (`fix: complete sprint 003 Asaas correction`) e o handoff inicial é
+`cea9eaa` (`docs: record sprint 003 r1 handoff`). A publicação da branch foi
+confirmada; o commit que contém esta linha registra essa evidência final.
 
 ## 2. Alterações
 
@@ -92,6 +94,7 @@ eventos de auditoria. Nenhum teste aplicou migração, reset ou bootstrap em `no
 | `pg_dump` / `createdb` / `pg_restore` / consulta / `dropdb` | 0 | backup e restauração temporária validados |
 | varredura por API key, token, documento aberto e URL secreta | sem achados | nenhum segredo/dado real no diff |
 | `git diff --check` | 0 | sem erro de whitespace |
+| `git push -u origin sprint-003-r1-asaas-completion` | 0 | nova branch publicada, sem force push ou merge |
 
 Ocorrências completas relevantes:
 
