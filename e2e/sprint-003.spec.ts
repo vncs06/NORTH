@@ -44,6 +44,8 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
     .fill('https://north.example.test/api/v1/webhooks/asaas/payments');
   await manager.getByRole('button', { name: 'Salvar conexão cifrada' }).click();
   await expect(manager.getByText('Conexão Sandbox armazenada de forma cifrada.')).toBeVisible();
+  await manager.getByRole('button', { name: 'Ativar política versionada' }).click();
+  await expect(manager.getByText('Política de absorção/repasse versionada.')).toBeVisible();
 
   const issued = await verificationPool.query<{ quoteId: string; materialId: string }>(
     `SELECT q.id AS "quoteId",qm.material_id AS "materialId" FROM quotes q
@@ -77,7 +79,7 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
   await expect(employee).toHaveURL(/\/orders\/[0-9a-f-]+$/);
   const orderId = employee.url().split('/').at(-1)!;
 
-  await employee.getByLabel('CPF/CNPJ, somente dígitos').fill('52998224725');
+  await employee.getByLabel('CPF/CNPJ').fill('529.982.247-25');
   await employee.getByRole('button', { name: 'Salvar protegido' }).click();
   await expect(employee.getByText(/Documento protegido configurado/)).toBeVisible();
   await employee.getByLabel('Meio').selectOption('PIX');
@@ -115,6 +117,7 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
   });
   await employee.getByRole('button', { name: 'Enviar arte' }).click();
   await expect(employee.getByText('Nova versão da arte armazenada privadamente.')).toBeVisible();
+  await employee.getByRole('button', { name: 'Solicitar aprovação do cliente' }).click();
   await employee.getByRole('button', { name: 'Registrar confirmação externa' }).click();
   await expect(employee.getByText('Operação registrada e prontidão reavaliada.')).toBeVisible();
 
@@ -133,6 +136,12 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
     path: 'docs/erp/evidence/sprint-003-ready-order.png',
     fullPage: true,
   });
+
+  await manager.goto('/settings/orders');
+  await manager.getByLabel('Modo').selectOption('FIXED_AMOUNT');
+  await manager.getByLabel('Valor fixo (R$)').fill('50');
+  await manager.getByRole('button', { name: 'Ativar nova versão' }).click();
+  await expect(manager.getByText('Política de sinal versionada e ativada.')).toBeVisible();
 
   const original = await verificationPool.query<{
     customerId: string;
@@ -178,12 +187,36 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
     .click();
   await expect(employee).toHaveURL(/\/orders\/[0-9a-f-]+$/);
   const shortageOrderId = employee.url().split('/').at(-1)!;
+  await employee.getByLabel('Meio').selectOption('CREDIT_CARD');
+  await employee.getByLabel('Vencimento').fill('2026-12-31');
+  await employee.getByRole('button', { name: 'Enfileirar no Asaas' }).click();
+  await expect(employee.getByText('Operação registrada e prontidão reavaliada.')).toBeVisible();
+  expect(await worker.processOneOutbox('e2e-card-worker')).toBe(true);
+  await employee.reload();
+  await expect(
+    employee.getByRole('link', { name: 'abrir experiência hospedada do Asaas' }),
+  ).toBeVisible();
   await employee.getByLabel('Arquivo da arte').setInputFiles({
     name: 'arte-falta.png',
     mimeType: 'image/png',
     buffer: Buffer.from('89504e470d0a1a0a', 'hex'),
   });
   await employee.getByRole('button', { name: 'Enviar arte' }).click();
+  await employee.getByRole('button', { name: 'Solicitar aprovação do cliente' }).click();
+  await manager.goto(`/orders/${shortageOrderId}`);
+  manager.once('dialog', (dialog) =>
+    dialog.accept('Cliente rejeitou a primeira versão no canal externo.'),
+  );
+  await manager.getByRole('button', { name: 'Registrar rejeição confirmada' }).click();
+  await expect(manager.getByText('REJECTED')).toBeVisible();
+  await employee.goto(`/orders/${shortageOrderId}`);
+  await employee.getByLabel('Arquivo da arte').setInputFiles({
+    name: 'arte-falta-revisada.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from('89504e470d0a1a0a', 'hex'),
+  });
+  await employee.getByRole('button', { name: 'Enviar arte' }).click();
+  await employee.getByRole('button', { name: 'Solicitar aprovação do cliente' }).click();
   await employee.getByRole('button', { name: 'Registrar confirmação externa' }).click();
   await manager.goto(`/orders/${shortageOrderId}`);
   await manager.getByRole('button', { name: 'Aprovar como gestor' }).click();
@@ -201,6 +234,17 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
     .fill('Compra emergencial autorizada.');
   await reserveForm.getByRole('button', { name: 'Reavaliar' }).click();
   await expect(manager.getByText('READY_FOR_PRODUCTION').first()).toBeVisible();
+
+  await manager.goto('/settings/orders');
+  await manager.getByLabel('Nova API key').fill('stub-rotated-api-key-000000000000');
+  await manager.getByRole('button', { name: 'Validar e rotacionar' }).click();
+  await expect(manager.getByText(/Nova chave validada e ativada/)).toBeVisible();
+  await verificationPool.query(
+    `UPDATE payment_charges SET status='CANCELLED' WHERE status IN ('PENDING_CREATION','CREATED','CONFIRMED','OVERDUE')`,
+  );
+  manager.once('dialog', (dialog) => dialog.accept());
+  await manager.getByRole('button', { name: 'Analisar impacto e desconectar' }).click();
+  await expect(manager.getByText(/Integração desconectada/)).toBeVisible();
 
   await employeeContext.close();
   await managerContext.close();

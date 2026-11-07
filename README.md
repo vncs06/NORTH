@@ -117,6 +117,14 @@ explícita em pedido copia esse snapshot. Uma reserva só é criada depois de ar
 aprovada, sinal confirmado ou exceção financeira gerencial e avaliação do saldo. A
 reserva altera apenas `reserved_quantity`; o físico não é consumido neste sprint.
 
+Na revisão R1 do Sprint 003, a política de sinal aceita percentual ou valor fixo. A
+configuração gerencial do Asaas consulta taxas da própria conta, versiona absorção ou
+repasse por meio, rotaciona a chave somente após validação e desconecta apenas depois
+de analisar pendências e remover o Webhook. Cartão usa exclusivamente a experiência
+hospedada do Asaas; o NORTH não recebe dados de cartão. A homologação real requer as
+quatro variáveis `ASAAS_ENVIRONMENT`, `ASAAS_API_KEY`,
+`ASAAS_WEBHOOK_AUTH_TOKEN` e `ASAAS_WEBHOOK_PUBLIC_URL` fora do repositório.
+
 Artes PNG, JPEG e PDF ficam em armazenamento privado, fora do banco e ignorado pelo
 Git. API key, token do webhook e documento de cobrança são cifrados com AES-256-GCM.
 Em execução não local, `NORTH_SECRET_MASTER_KEY` é obrigatória. O worker processa

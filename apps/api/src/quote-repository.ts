@@ -20,6 +20,7 @@ import {
   type PricingComponentType,
   type PricingMethod,
 } from '@north/domain/commercial';
+import { calculatePaymentFee } from '@north/domain/fulfillment';
 import { CatalogRepository } from './catalog-repository.js';
 import {
   commercialAudit,
@@ -175,6 +176,19 @@ interface QuoteCalculation {
   manualReason: string | null;
   finalPriceCents: number;
   adjusted: boolean;
+  paymentFees: Array<{
+    feePolicyId: string;
+    feePolicyVersion: number;
+    feeSnapshotId: string;
+    billingType: 'PIX' | 'BOLETO' | 'CREDIT_CARD';
+    strategy: 'ABSORB' | 'PASS_THROUGH';
+    fixedFeeCents: string;
+    percentageBps: number;
+    baseAmountCents: number;
+    feeCents: number;
+    chargedAmountCents: number;
+    netAmountCents: number;
+  }>;
 }
 
 @Injectable()
@@ -725,6 +739,32 @@ export class QuoteRepository {
       confirmedFinalCents: options.manualFinalPriceCents,
       reason: options.manualReason,
     });
+    const feeRows = await client.query<{
+      feePolicyId: string;
+      feePolicyVersion: number;
+      feeSnapshotId: string;
+      billingType: 'PIX' | 'BOLETO' | 'CREDIT_CARD';
+      strategy: 'ABSORB' | 'PASS_THROUGH';
+      fixedFeeCents: string;
+      percentageBps: number;
+    }>(
+      `SELECT p.id AS "feePolicyId",p.version_number AS "feePolicyVersion",
+              p.fee_snapshot_id AS "feeSnapshotId",m.billing_type AS "billingType",m.strategy,
+              i.fixed_fee_cents::text AS "fixedFeeCents",i.percentage_bps AS "percentageBps"
+       FROM payment_fee_policies p
+       JOIN payment_fee_policy_methods m ON m.policy_id=p.id
+       JOIN asaas_fee_items i ON i.snapshot_id=p.fee_snapshot_id AND i.billing_type=m.billing_type
+       WHERE p.status='ACTIVE' ORDER BY m.billing_type`,
+    );
+    const paymentFees = feeRows.rows.map((fee) => ({
+      ...fee,
+      ...calculatePaymentFee({
+        baseAmountCents: manual.finalPriceCents,
+        fixedFeeCents: Number(fee.fixedFeeCents),
+        percentageBps: fee.percentageBps,
+        strategy: fee.strategy,
+      }),
+    }));
     return {
       quoteId,
       customer: {
@@ -755,6 +795,7 @@ export class QuoteRepository {
       manualReason: options.manualReason?.trim() || null,
       finalPriceCents: manual.finalPriceCents,
       adjusted: manual.adjusted,
+      paymentFees,
     };
   }
 
@@ -860,6 +901,30 @@ export class QuoteRepository {
           ],
         );
       }
+      for (const fee of calculation.paymentFees) {
+        await client.query(
+          `INSERT INTO quote_payment_fee_snapshots
+             (id,quote_id,fee_policy_id,fee_policy_version,fee_snapshot_id,billing_type,strategy,
+              base_amount_cents,fixed_fee_cents,percentage_bps,estimated_fee_cents,
+              charged_amount_cents,estimated_net_cents)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          [
+            randomUUID(),
+            id,
+            fee.feePolicyId,
+            fee.feePolicyVersion,
+            fee.feeSnapshotId,
+            fee.billingType,
+            fee.strategy,
+            fee.baseAmountCents,
+            fee.fixedFeeCents,
+            fee.percentageBps,
+            fee.feeCents,
+            fee.chargedAmountCents,
+            fee.netAmountCents,
+          ],
+        );
+      }
       await client.query(
         `UPDATE quotes
          SET status='ISSUED',version=version+1,pricing_policy_id=$2,discount_policy_id=$3,
@@ -901,6 +966,7 @@ export class QuoteRepository {
               discountCents: calculation.discountCents,
               finalPriceCents: calculation.finalPriceCents,
             },
+            paymentFees: calculation.paymentFees,
           }),
           actor.id,
         ],

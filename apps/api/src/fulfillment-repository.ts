@@ -13,8 +13,10 @@ import {
 import {
   assertOrderTransition,
   assertStockException,
+  calculatePaymentFee,
   calculateDepositCents,
   evaluateOrderReadiness,
+  normalizeAndValidateTaxDocument,
   paymentEventStatus,
   type OrderStatus,
 } from '@north/domain/fulfillment';
@@ -32,6 +34,8 @@ import {
   PrivateObjectStorage,
   protectedHash,
   shortFingerprint,
+  normalizeAsaasFees,
+  safeHostedInvoiceUrl,
   validateArtworkContent,
 } from './fulfillment-infrastructure.js';
 
@@ -48,6 +52,9 @@ interface OrderRow {
   depositPolicyId: string;
   depositPolicyVersion: number;
   depositRateBps: number;
+  depositMode: 'PERCENTAGE' | 'FIXED_AMOUNT';
+  depositFixedAmountCents: string | null;
+  depositAllowAboveTotal: boolean;
   depositAmountCents: string;
   paidAmountCents: string;
   currentArtworkVersionId: string | null;
@@ -65,6 +72,7 @@ interface SecretRow {
   webhookTokenAuthTag: Buffer;
   webhookPublicUrl: string;
   keyFingerprint: string;
+  externalWebhookId: string | null;
 }
 
 interface ArtworkDetailRow {
@@ -94,6 +102,9 @@ interface AsaasConfigurationView {
   createdAt?: Date;
   updatedAt?: Date;
 }
+
+type BillingType = 'PIX' | 'BOLETO' | 'CREDIT_CARD';
+type FeeStrategy = 'ABSORB' | 'PASS_THROUGH';
 
 async function audit(
   client: DatabaseClient,
@@ -142,7 +153,10 @@ export class FulfillmentRepository {
               customer_id AS "customerId",status,version,quote_number_snapshot AS "quoteNumberSnapshot",
               customer_name_snapshot AS "customerNameSnapshot",total_amount_cents::text AS "totalAmountCents",
               deposit_policy_id AS "depositPolicyId",deposit_policy_version AS "depositPolicyVersion",
-              deposit_rate_bps AS "depositRateBps",deposit_amount_cents::text AS "depositAmountCents",
+              deposit_rate_bps AS "depositRateBps",deposit_mode AS "depositMode",
+              deposit_fixed_amount_cents::text AS "depositFixedAmountCents",
+              deposit_allow_above_total AS "depositAllowAboveTotal",
+              deposit_amount_cents::text AS "depositAmountCents",
               paid_amount_cents::text AS "paidAmountCents",
               current_artwork_version_id AS "currentArtworkVersionId",
               created_at AS "createdAt",updated_at AS "updatedAt"
@@ -153,13 +167,18 @@ export class FulfillmentRepository {
     return result.rows[0];
   }
 
-  private async activeConnection(client: Pick<DatabaseClient, 'query'> = pool): Promise<SecretRow> {
+  private async activeConnection(
+    client: Pick<DatabaseClient, 'query'> = pool,
+    includePending = false,
+  ): Promise<SecretRow> {
     const result = await client.query<SecretRow>(
       `SELECT id,api_key_ciphertext AS "apiKeyCiphertext",api_key_nonce AS "apiKeyNonce",
               api_key_auth_tag AS "apiKeyAuthTag",webhook_token_ciphertext AS "webhookTokenCiphertext",
               webhook_token_nonce AS "webhookTokenNonce",webhook_token_auth_tag AS "webhookTokenAuthTag",
-              webhook_public_url AS "webhookPublicUrl",key_fingerprint AS "keyFingerprint"
-       FROM asaas_connections WHERE status='ACTIVE' AND environment='SANDBOX'`,
+              webhook_public_url AS "webhookPublicUrl",key_fingerprint AS "keyFingerprint",
+              external_webhook_id AS "externalWebhookId"
+       FROM asaas_connections WHERE status ${includePending ? "IN ('CONNECTED','ROTATION_PENDING','DISCONNECT_PENDING','ERROR')" : "='CONNECTED'"}
+         AND environment='SANDBOX' ORDER BY updated_at DESC LIMIT 1`,
     );
     if (!result.rows[0]) {
       throw new DomainError(
@@ -177,9 +196,16 @@ export class FulfillmentRepository {
     cpfCnpj: string,
     correlationId: string,
   ) {
-    const encrypted = encryptSecret(cpfCnpj, `customer:${customerId}:billing-document`);
-    const hash = protectedHash(cpfCnpj, 'customer-billing-document');
     return transaction(async (client) => {
+      const customer = await client.query<{ type: 'PERSON' | 'COMPANY' }>(
+        'SELECT type FROM customers WHERE id=$1 FOR UPDATE',
+        [customerId],
+      );
+      if (!customer.rows[0])
+        throw new DomainError('CUSTOMER_NOT_FOUND', 'Cliente não encontrado.', 404);
+      const normalized = normalizeAndValidateTaxDocument(cpfCnpj, customer.rows[0].type);
+      const encrypted = encryptSecret(normalized, `customer:${customerId}:billing-document`);
+      const hash = protectedHash(normalized, 'customer-billing-document');
       const result = await client.query<{ id: string; version: number }>(
         `UPDATE customers SET billing_document_ciphertext=$2,billing_document_nonce=$3,
            billing_document_auth_tag=$4,billing_document_hash=$5,billing_document_last4=$6,
@@ -191,7 +217,7 @@ export class FulfillmentRepository {
           encrypted.nonce,
           encrypted.authTag,
           hash,
-          cpfCnpj.slice(-4),
+          normalized.slice(-4),
           actor.id,
         ],
       );
@@ -204,19 +230,27 @@ export class FulfillmentRepository {
         resourceType: 'customer',
         resourceId: customerId,
         correlationId,
-        after: { billingDocumentConfigured: true, billingDocumentLast4: cpfCnpj.slice(-4) },
+        after: { billingDocumentConfigured: true, billingDocumentLast4: normalized.slice(-4) },
       });
       return {
         id: customerId,
         version: result.rows[0].version,
-        billingDocumentLast4: cpfCnpj.slice(-4),
+        billingDocumentLast4: normalized.slice(-4),
       };
     });
   }
 
   async putDepositPolicy(
     actor: CurrentActor,
-    input: { rateBps: number; minimumAmountCents: number; effectiveAt: string },
+    input:
+      | { mode: 'PERCENTAGE'; rateBps: number; fixedAmountCents?: null; effectiveAt: string }
+      | {
+          mode: 'FIXED_AMOUNT';
+          rateBps?: null;
+          fixedAmountCents: number;
+          allowAboveTotal: boolean;
+          effectiveAt: string;
+        },
     key: string,
     correlationId: string,
   ) {
@@ -239,13 +273,16 @@ export class FulfillmentRepository {
       );
       await client.query(
         `INSERT INTO deposit_policies
-           (id,version_number,status,rate_bps,minimum_amount_cents,effective_at,created_by)
-         VALUES($1,$2,'ACTIVE',$3,$4,$5,$6)`,
+           (id,version_number,status,mode,rate_bps,minimum_amount_cents,fixed_amount_cents,
+            allow_above_total,effective_at,created_by)
+         VALUES($1,$2,'ACTIVE',$3,$4,NULL,$5,$6,$7,$8)`,
         [
           id,
           versionResult.rows[0]!.version,
-          input.rateBps,
-          input.minimumAmountCents,
+          input.mode,
+          input.mode === 'PERCENTAGE' ? input.rateBps : null,
+          input.mode === 'FIXED_AMOUNT' ? input.fixedAmountCents : null,
+          input.mode === 'FIXED_AMOUNT' ? input.allowAboveTotal : false,
           input.effectiveAt,
           actor.id,
         ],
@@ -274,12 +311,15 @@ export class FulfillmentRepository {
     const result = await client.query<{
       id: string;
       versionNumber: number;
-      rateBps: number;
-      minimumAmountCents: string;
+      mode: 'PERCENTAGE' | 'FIXED_AMOUNT';
+      rateBps: number | null;
+      fixedAmountCents: string | null;
+      allowAboveTotal: boolean;
       effectiveAt: Date;
     }>(
-      `SELECT id,version_number AS "versionNumber",rate_bps AS "rateBps",
-              minimum_amount_cents::text AS "minimumAmountCents",effective_at AS "effectiveAt"
+      `SELECT id,version_number AS "versionNumber",mode,rate_bps AS "rateBps",
+              fixed_amount_cents::text AS "fixedAmountCents",
+              allow_above_total AS "allowAboveTotal",effective_at AS "effectiveAt"
        FROM deposit_policies WHERE status='ACTIVE'`,
     );
     if (!result.rows[0])
@@ -332,8 +372,11 @@ export class FulfillmentRepository {
       const total = Number(quote.finalPriceCents);
       const deposit = calculateDepositCents({
         totalCents: total,
-        rateBps: policy.rateBps,
-        minimumAmountCents: Number(policy.minimumAmountCents),
+        policy:
+          policy.mode === 'PERCENTAGE'
+            ? { mode: 'PERCENTAGE', rateBps: policy.rateBps! }
+            : { mode: 'FIXED_AMOUNT', fixedAmountCents: Number(policy.fixedAmountCents) },
+        allowAboveTotal: policy.allowAboveTotal,
       });
       const numberResult = await client.query<{ number: string }>(
         `SELECT 'PED-' || to_char(clock_timestamp() AT TIME ZONE 'America/Manaus','YYYY') ||
@@ -344,8 +387,9 @@ export class FulfillmentRepository {
         `INSERT INTO orders
            (id,commercial_number,quote_id,customer_id,status,quote_number_snapshot,
             customer_name_snapshot,total_amount_cents,deposit_policy_id,deposit_policy_version,
-            deposit_rate_bps,deposit_amount_cents,created_by)
-         VALUES($1,$2,$3,$4,'PENDING_READINESS',$5,$6,$7,$8,$9,$10,$11,$12)`,
+            deposit_mode,deposit_rate_bps,deposit_fixed_amount_cents,deposit_allow_above_total,
+            deposit_amount_cents,created_by)
+         VALUES($1,$2,$3,$4,'PENDING_READINESS',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
         [
           id,
           numberResult.rows[0]!.number,
@@ -356,7 +400,10 @@ export class FulfillmentRepository {
           total,
           policy.id,
           policy.versionNumber,
+          policy.mode,
           policy.rateBps,
+          policy.fixedAmountCents,
+          policy.allowAboveTotal,
           deposit,
           actor.id,
         ],
@@ -547,12 +594,16 @@ export class FulfillmentRepository {
     const charges = await client.query(
       `SELECT id,status,billing_type AS "billingType",amount_cents::text AS "amountCents",
         due_date::text AS "dueDate",invoice_url AS "invoiceUrl",external_charge_id AS "externalChargeId",
+        fee_strategy AS "feeStrategy",estimated_fee_cents::text AS "estimatedFeeCents",
+        estimated_net_cents::text AS "estimatedNetCents",
         created_at AS "createdAt" FROM payment_charges WHERE order_id=$1 ORDER BY created_at DESC`,
       [id],
     );
     const artworks = await client.query<ArtworkDetailRow>(
       `SELECT a.id,a.version_number AS "versionNumber",a.status,a.customer_confirmation_reference AS "customerConfirmationReference",
         a.customer_confirmed_at AS "customerConfirmedAt",f.original_name AS "originalName",f.mime_type AS "mimeType",
+        a.approval_requested_at AS "approvalRequestedAt",a.rejected_at AS "rejectedAt",
+        a.rejection_reason AS "rejectionReason",a.rejection_confirmation_source AS "rejectionConfirmationSource",
         f.size_bytes::text AS "sizeBytes",f.sha256,a.created_at AS "createdAt"
         FROM artwork_versions a JOIN object_files f ON f.id=a.file_id WHERE a.order_id=$1 ORDER BY a.version_number DESC`,
       [id],
@@ -618,8 +669,25 @@ export class FulfillmentRepository {
     correlationId: string,
   ): Promise<AsaasConfigurationView> {
     const id = randomUUID();
+    const gateway = new AsaasGateway(input.apiKey);
+    const fees = await gateway.getFees();
+    const webhook = await gateway.createWebhook({
+      name: 'NORTH ERP - pagamentos',
+      url: input.webhookPublicUrl,
+      authToken: input.webhookAuthToken,
+      events: [
+        'PAYMENT_CREATED',
+        'PAYMENT_UPDATED',
+        'PAYMENT_CONFIRMED',
+        'PAYMENT_RECEIVED',
+        'PAYMENT_OVERDUE',
+        'PAYMENT_PARTIALLY_REFUNDED',
+        'PAYMENT_REFUNDED',
+        'PAYMENT_CHARGEBACK_REQUESTED',
+      ],
+    });
     const apiKey = encryptSecret(input.apiKey, `asaas:${id}:api-key`);
-    const webhook = encryptSecret(input.webhookAuthToken, `asaas:${id}:webhook-token`);
+    const webhookToken = encryptSecret(input.webhookAuthToken, `asaas:${id}:webhook-token`);
     const payload = {
       environment: input.environment,
       webhookPublicUrl: input.webhookPublicUrl,
@@ -630,28 +698,33 @@ export class FulfillmentRepository {
       const locked = await lockIdempotency(client, { scope: 'asaas-connection', key, payload });
       if (locked.replayResourceId) return await this.getAsaasConfiguration(client);
       await client.query(
-        `UPDATE asaas_connections SET status='INACTIVE',updated_by=$1,updated_at=clock_timestamp() WHERE status='ACTIVE'`,
+        `UPDATE asaas_connections SET status='DISCONNECTED',api_key_ciphertext=NULL,api_key_nonce=NULL,
+         api_key_auth_tag=NULL,webhook_token_ciphertext=NULL,webhook_token_nonce=NULL,
+         webhook_token_auth_tag=NULL,disconnected_at=clock_timestamp(),updated_by=$1,
+         updated_at=clock_timestamp() WHERE status='CONNECTED'`,
         [actor.id],
       );
       await client.query(
         `INSERT INTO asaas_connections
            (id,environment,status,api_key_ciphertext,api_key_nonce,api_key_auth_tag,
             webhook_token_ciphertext,webhook_token_nonce,webhook_token_auth_tag,
-            webhook_public_url,key_fingerprint,created_by,updated_by)
-         VALUES($1,'SANDBOX','ACTIVE',$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)`,
+            webhook_public_url,key_fingerprint,external_webhook_id,last_validated_at,created_by,updated_by)
+         VALUES($1,'SANDBOX','CONNECTED',$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp(),$11,$11)`,
         [
           id,
           apiKey.ciphertext,
           apiKey.nonce,
           apiKey.authTag,
-          webhook.ciphertext,
-          webhook.nonce,
-          webhook.authTag,
+          webhookToken.ciphertext,
+          webhookToken.nonce,
+          webhookToken.authTag,
           input.webhookPublicUrl,
           payload.keyFingerprint,
+          webhook.id,
           actor.id,
         ],
       );
+      await this.storeFeeSnapshot(client, id, fees, actor.id);
       await recordIdempotency(client, {
         scope: 'asaas-connection',
         key,
@@ -678,15 +751,403 @@ export class FulfillmentRepository {
     const result = await client.query<AsaasConfigurationView>(
       `SELECT id,environment,status,webhook_public_url AS "webhookPublicUrl",
               key_fingerprint AS "keyFingerprint",version,created_at AS "createdAt",updated_at AS "updatedAt"
-       FROM asaas_connections WHERE status='ACTIVE'`,
+       FROM asaas_connections ORDER BY updated_at DESC LIMIT 1`,
     );
     return result.rows[0] ?? { status: 'NOT_CONFIGURED', environment: 'SANDBOX' };
+  }
+
+  private async storeFeeSnapshot(
+    client: Pick<DatabaseClient, 'query'>,
+    connectionId: string,
+    payload: Record<string, unknown>,
+    actorId?: string,
+  ): Promise<string> {
+    const id = randomUUID();
+    const safe = sanitizeBusinessAuditData(payload) ?? {};
+    await client.query(
+      `UPDATE asaas_fee_snapshots SET status='STALE'
+       WHERE connection_id=$1 AND status='AVAILABLE'`,
+      [connectionId],
+    );
+    await client.query(
+      `INSERT INTO asaas_fee_snapshots
+         (id,connection_id,environment,status,fetched_at,sanitized_payload,created_by)
+       VALUES($1,$2,'SANDBOX','AVAILABLE',clock_timestamp(),$3::jsonb,$4)`,
+      [id, connectionId, JSON.stringify(safe), actorId ?? null],
+    );
+    for (const fee of normalizeAsaasFees(payload)) {
+      await client.query(
+        `INSERT INTO asaas_fee_items
+           (id,snapshot_id,billing_type,fixed_fee_cents,percentage_bps,settlement_days,conditions)
+         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [
+          randomUUID(),
+          id,
+          fee.billingType,
+          fee.fixedFeeCents,
+          fee.percentageBps,
+          fee.settlementDays,
+          JSON.stringify(fee.conditions),
+        ],
+      );
+    }
+    return id;
+  }
+
+  async refreshAsaasFees(actor: CurrentActor, key: string, correlationId: string) {
+    const connection = await this.activeConnection();
+    const apiKey = decryptSecret(
+      {
+        ciphertext: connection.apiKeyCiphertext,
+        nonce: connection.apiKeyNonce,
+        authTag: connection.apiKeyAuthTag,
+      },
+      `asaas:${connection.id}:api-key`,
+    );
+    try {
+      const payload = await new AsaasGateway(apiKey).getFees();
+      return transaction(async (client) => {
+        const locked = await lockIdempotency(client, {
+          scope: 'asaas-fees-refresh',
+          key,
+          payload: { connectionId: connection.id },
+        });
+        if (locked.replayResourceId) return this.getAsaasFees(client);
+        const snapshotId = await this.storeFeeSnapshot(client, connection.id, payload, actor.id);
+        await recordIdempotency(client, {
+          scope: 'asaas-fees-refresh',
+          key,
+          hash: locked.hash,
+          resourceType: 'asaas_fee_snapshot',
+          resourceId: snapshotId,
+        });
+        await audit(client, {
+          actorType: 'USER',
+          actorId: actor.id,
+          action: 'ASAAS_FEES_REFRESHED',
+          resourceType: 'asaas_fee_snapshot',
+          resourceId: snapshotId,
+          correlationId,
+          after: { environment: 'SANDBOX', status: 'AVAILABLE' },
+        });
+        return this.getAsaasFees(client);
+      }, 'SERIALIZABLE');
+    } catch (error) {
+      const code = error instanceof DomainError ? error.code : 'ASAAS_FEE_FETCH_FAILED';
+      await pool.query(
+        `INSERT INTO asaas_fee_snapshots
+           (id,connection_id,environment,status,sanitized_payload,error_code,created_by)
+         VALUES($1,$2,'SANDBOX','FAILED','{}'::jsonb,$3,$4)`,
+        [randomUUID(), connection.id, code, actor.id],
+      );
+      throw error;
+    }
+  }
+
+  async getAsaasFees(client: Pick<DatabaseClient, 'query'> = pool) {
+    const snapshots = await client.query<{
+      id: string;
+      status: string;
+      fetchedAt: Date | null;
+      environment: string;
+      errorCode: string | null;
+    }>(
+      `SELECT id,status,fetched_at AS "fetchedAt",environment,error_code AS "errorCode"
+       FROM asaas_fee_snapshots ORDER BY created_at DESC LIMIT 1`,
+    );
+    const snapshot = snapshots.rows[0];
+    if (!snapshot) return { status: 'NOT_FETCHED', environment: 'SANDBOX', items: [] };
+    const items = await client.query(
+      `SELECT billing_type AS "billingType",fixed_fee_cents::text AS "fixedFeeCents",
+              percentage_bps AS "percentageBps",settlement_days AS "settlementDays",conditions
+       FROM asaas_fee_items WHERE snapshot_id=$1 ORDER BY billing_type`,
+      [snapshot.id],
+    );
+    return { ...snapshot, items: items.rows, effectivePaymentConditionMayPrevail: true };
+  }
+
+  async putFeePolicy(
+    actor: CurrentActor,
+    input: {
+      effectiveAt: string;
+      methods: Array<{ billingType: BillingType; strategy: FeeStrategy }>;
+    },
+    key: string,
+    correlationId: string,
+  ) {
+    return transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: 'payment-fee-policy',
+        key,
+        payload: input,
+      });
+      if (locked.replayResourceId) return this.getFeePolicy(client);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('payment-fee-policy',0))");
+      const snapshot = await client.query<{ id: string }>(
+        `SELECT id FROM asaas_fee_snapshots WHERE status='AVAILABLE' ORDER BY fetched_at DESC LIMIT 1 FOR SHARE`,
+      );
+      if (!snapshot.rows[0])
+        throw new DomainError('ASAAS_FEES_UNAVAILABLE', 'Atualize as taxas do Asaas.', 422);
+      const next = await client.query<{ version: number }>(
+        'SELECT COALESCE(max(version_number),0)+1 AS version FROM payment_fee_policies',
+      );
+      await client.query(
+        "UPDATE payment_fee_policies SET status='ARCHIVED',archived_at=clock_timestamp() WHERE status='ACTIVE'",
+      );
+      const id = randomUUID();
+      await client.query(
+        `INSERT INTO payment_fee_policies(id,version_number,status,fee_snapshot_id,effective_at,created_by)
+         VALUES($1,$2,'ACTIVE',$3,$4,$5)`,
+        [id, next.rows[0]!.version, snapshot.rows[0].id, input.effectiveAt, actor.id],
+      );
+      for (const method of input.methods) {
+        await client.query(
+          `INSERT INTO payment_fee_policy_methods(id,policy_id,billing_type,strategy) VALUES($1,$2,$3,$4)`,
+          [randomUUID(), id, method.billingType, method.strategy],
+        );
+      }
+      await recordIdempotency(client, {
+        scope: 'payment-fee-policy',
+        key,
+        hash: locked.hash,
+        resourceType: 'payment_fee_policy',
+        resourceId: id,
+      });
+      await audit(client, {
+        actorType: 'USER',
+        actorId: actor.id,
+        action: 'PAYMENT_FEE_POLICY_ACTIVATED',
+        resourceType: 'payment_fee_policy',
+        resourceId: id,
+        correlationId,
+        after: { version: next.rows[0]!.version, methods: input.methods },
+      });
+      return this.getFeePolicy(client);
+    }, 'SERIALIZABLE');
+  }
+
+  async getFeePolicy(client: Pick<DatabaseClient, 'query'> = pool) {
+    const policy = await client.query<{
+      id: string;
+      versionNumber: number;
+      feeSnapshotId: string;
+      effectiveAt: Date;
+    }>(
+      `SELECT id,version_number AS "versionNumber",fee_snapshot_id AS "feeSnapshotId",effective_at AS "effectiveAt"
+       FROM payment_fee_policies WHERE status='ACTIVE'`,
+    );
+    if (!policy.rows[0]) return null;
+    const methods = await client.query(
+      `SELECT billing_type AS "billingType",strategy FROM payment_fee_policy_methods WHERE policy_id=$1 ORDER BY billing_type`,
+      [policy.rows[0].id],
+    );
+    return { ...policy.rows[0], methods: methods.rows };
+  }
+
+  async rotateAsaasKey(actor: CurrentActor, newApiKey: string, key: string, correlationId: string) {
+    const connection = await transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: 'asaas-key-rotation',
+        key,
+        payload: { fingerprint: shortFingerprint(newApiKey) },
+      });
+      if (locked.replayResourceId) return this.activeConnection(client);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('asaas-key-rotation',0))");
+      const current = await this.activeConnection(client);
+      const changed = await client.query(
+        `UPDATE asaas_connections SET status='ROTATION_PENDING',updated_by=$2,updated_at=clock_timestamp()
+         WHERE id=$1 AND status='CONNECTED'`,
+        [current.id, actor.id],
+      );
+      if (changed.rowCount !== 1)
+        throw new DomainError(
+          'ASAAS_ROTATION_CONFLICT',
+          'Outra operação da integração está em andamento.',
+          409,
+        );
+      await client.query(
+        `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,created_by)
+         VALUES($1,$2,'ROTATE','STARTED',$3,'SANDBOX',$4)`,
+        [randomUUID(), current.id, shortFingerprint(newApiKey), actor.id],
+      );
+      return current;
+    }, 'SERIALIZABLE');
+    try {
+      const fees = await new AsaasGateway(newApiKey).getFees();
+      const encrypted = encryptSecret(newApiKey, `asaas:${connection.id}:api-key`);
+      await transaction(async (client) => {
+        const result = await client.query(
+          `UPDATE asaas_connections SET status='CONNECTED',api_key_ciphertext=$2,api_key_nonce=$3,
+             api_key_auth_tag=$4,key_fingerprint=$5,last_validated_at=clock_timestamp(),last_error_code=NULL,
+             version=version+1,updated_by=$6,updated_at=clock_timestamp()
+           WHERE id=$1 AND status='ROTATION_PENDING'`,
+          [
+            connection.id,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            encrypted.authTag,
+            shortFingerprint(newApiKey),
+            actor.id,
+          ],
+        );
+        if (result.rowCount !== 1)
+          throw new DomainError('ASAAS_ROTATION_CONFLICT', 'A rotação perdeu a concorrência.', 409);
+        const snapshotId = await this.storeFeeSnapshot(client, connection.id, fees, actor.id);
+        await recordIdempotency(client, {
+          scope: 'asaas-key-rotation',
+          key,
+          hash: commercialRequestHash({ fingerprint: shortFingerprint(newApiKey) }),
+          resourceType: 'asaas_connection',
+          resourceId: connection.id,
+        });
+        await client.query(
+          `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,created_by)
+           VALUES($1,$2,'ROTATE','SUCCEEDED',$3,'SANDBOX',$4)`,
+          [randomUUID(), connection.id, shortFingerprint(newApiKey), actor.id],
+        );
+        await audit(client, {
+          actorType: 'USER',
+          actorId: actor.id,
+          action: 'ASAAS_API_KEY_ROTATED',
+          resourceType: 'asaas_connection',
+          resourceId: connection.id,
+          correlationId,
+          after: {
+            environment: 'SANDBOX',
+            keyFingerprint: shortFingerprint(newApiKey),
+            feeSnapshotId: snapshotId,
+          },
+        });
+      }, 'SERIALIZABLE');
+      return this.getAsaasConfiguration();
+    } catch (error) {
+      const code = error instanceof DomainError ? error.code : 'ASAAS_ROTATION_FAILED';
+      await pool.query(
+        `UPDATE asaas_connections SET status='CONNECTED',last_error_code=$2,updated_at=clock_timestamp()
+         WHERE id=$1 AND status='ROTATION_PENDING'`,
+        [connection.id, code],
+      );
+      await pool.query(
+        `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,error_code,created_by)
+         VALUES($1,$2,'ROTATE','FAILED',$3,'SANDBOX',$4,$5)`,
+        [randomUUID(), connection.id, shortFingerprint(newApiKey), code, actor.id],
+      );
+      throw error;
+    }
+  }
+
+  async getAsaasDisconnectImpact() {
+    const result = await pool.query<{
+      pendingJobs: number;
+      creatingCharges: number;
+      unreconciledCharges: number;
+    }>(
+      `SELECT
+        (SELECT count(*)::int FROM integration_outbox WHERE status IN ('PENDING','PROCESSING','FAILED')) AS "pendingJobs",
+        (SELECT count(*)::int FROM payment_charges WHERE status='PENDING_CREATION') AS "creatingCharges",
+        (SELECT count(*)::int FROM payment_charges WHERE status IN ('CREATED','CONFIRMED','OVERDUE')) AS "unreconciledCharges"`,
+    );
+    return {
+      ...result.rows[0]!,
+      webhookConfigured: Boolean((await this.activeConnection()).externalWebhookId),
+    };
+  }
+
+  async disconnectAsaas(actor: CurrentActor, key: string, correlationId: string) {
+    const impact = await this.getAsaasDisconnectImpact();
+    if (impact.pendingJobs > 0 || impact.creatingCharges > 0 || impact.unreconciledCharges > 0) {
+      throw new DomainError(
+        'ASAAS_DISCONNECT_BLOCKED',
+        'Existem cobranças ou jobs pendentes.',
+        409,
+        impact,
+      );
+    }
+    const connection = await transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: 'asaas-disconnect',
+        key,
+        payload: { confirmImpact: true },
+      });
+      if (locked.replayResourceId) return null;
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('asaas-connection-lifecycle',0))",
+      );
+      const current = await this.activeConnection(client);
+      await client.query(
+        `UPDATE asaas_connections SET status='DISCONNECT_PENDING',updated_by=$2,updated_at=clock_timestamp() WHERE id=$1`,
+        [current.id, actor.id],
+      );
+      return current;
+    }, 'SERIALIZABLE');
+    if (!connection) return this.getAsaasConfiguration();
+    const apiKey = decryptSecret(
+      {
+        ciphertext: connection.apiKeyCiphertext,
+        nonce: connection.apiKeyNonce,
+        authTag: connection.apiKeyAuthTag,
+      },
+      `asaas:${connection.id}:api-key`,
+    );
+    try {
+      if (connection.externalWebhookId)
+        await new AsaasGateway(apiKey).deleteWebhook(connection.externalWebhookId);
+      await transaction(async (client) => {
+        await client.query(
+          `UPDATE asaas_connections SET status='DISCONNECTED',api_key_ciphertext=NULL,api_key_nonce=NULL,
+             api_key_auth_tag=NULL,webhook_token_ciphertext=NULL,webhook_token_nonce=NULL,
+             webhook_token_auth_tag=NULL,disconnected_at=clock_timestamp(),updated_by=$2,
+             version=version+1,updated_at=clock_timestamp() WHERE id=$1 AND status='DISCONNECT_PENDING'`,
+          [connection.id, actor.id],
+        );
+        await recordIdempotency(client, {
+          scope: 'asaas-disconnect',
+          key,
+          hash: commercialRequestHash({ confirmImpact: true }),
+          resourceType: 'asaas_connection',
+          resourceId: connection.id,
+        });
+        await client.query(
+          `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,impact,created_by)
+           VALUES($1,$2,'DISCONNECT','SUCCEEDED',$3,'SANDBOX',$4::jsonb,$5)`,
+          [
+            randomUUID(),
+            connection.id,
+            connection.keyFingerprint,
+            JSON.stringify(impact),
+            actor.id,
+          ],
+        );
+        await audit(client, {
+          actorType: 'USER',
+          actorId: actor.id,
+          action: 'ASAAS_DISCONNECTED',
+          resourceType: 'asaas_connection',
+          resourceId: connection.id,
+          correlationId,
+          after: { environment: 'SANDBOX', impact },
+        });
+      });
+      return this.getAsaasConfiguration();
+    } catch (error) {
+      const code = error instanceof DomainError ? error.code : 'ASAAS_WEBHOOK_DISABLE_FAILED';
+      await pool.query(
+        `UPDATE asaas_connections SET status='ERROR',last_error_code=$2,updated_at=clock_timestamp() WHERE id=$1`,
+        [connection.id, code],
+      );
+      throw new DomainError(
+        'ASAAS_DISCONNECT_INCOMPLETE',
+        'Não foi possível desativar o Webhook externo; o segredo foi preservado.',
+        502,
+        { actionRequired: 'Desativar o Webhook no Sandbox e tentar novamente.' },
+      );
+    }
   }
 
   async createCharge(
     actor: CurrentActor,
     orderId: string,
-    input: { billingType: 'PIX' | 'BOLETO' | 'UNDEFINED'; dueDate: string },
+    input: { billingType: BillingType; dueDate: string },
     key: string,
     correlationId: string,
   ) {
@@ -712,20 +1173,74 @@ export class FulfillmentRepository {
           422,
         );
       }
+      const snapshot = await client.query<{
+        feePolicyId: string;
+        feePolicyVersion: number;
+        feeSnapshotId: string;
+        strategy: FeeStrategy;
+        fixedFeeCents: string;
+        percentageBps: number;
+      }>(
+        `SELECT s.fee_policy_id AS "feePolicyId",s.fee_policy_version AS "feePolicyVersion",
+                s.fee_snapshot_id AS "feeSnapshotId",s.strategy,
+                s.fixed_fee_cents::text AS "fixedFeeCents",s.percentage_bps AS "percentageBps"
+         FROM quote_payment_fee_snapshots s WHERE s.quote_id=$1 AND s.billing_type=$2`,
+        [order.quoteId, input.billingType],
+      );
+      let fee = snapshot.rows[0];
+      if (!fee) {
+        const current = await client.query<(typeof snapshot.rows)[0]>(
+          `SELECT p.id AS "feePolicyId",p.version_number AS "feePolicyVersion",
+                  p.fee_snapshot_id AS "feeSnapshotId",m.strategy,
+                  i.fixed_fee_cents::text AS "fixedFeeCents",i.percentage_bps AS "percentageBps"
+           FROM payment_fee_policies p
+           JOIN payment_fee_policy_methods m ON m.policy_id=p.id AND m.billing_type=$1
+           JOIN asaas_fee_items i ON i.snapshot_id=p.fee_snapshot_id AND i.billing_type=m.billing_type
+           WHERE p.status='ACTIVE'`,
+          [input.billingType],
+        );
+        fee = current.rows[0];
+        if (!fee)
+          throw new DomainError(
+            'PAYMENT_FEE_POLICY_MISSING',
+            'Configure a política de taxas.',
+            422,
+          );
+        if (fee.strategy === 'PASS_THROUGH') {
+          throw new DomainError(
+            'QUOTE_FEE_REVISION_REQUIRED',
+            'O orçamento não contém o repasse vigente; crie e emita uma revisão.',
+            409,
+          );
+        }
+      }
+      const feeCalculation = calculatePaymentFee({
+        baseAmountCents: Number(order.depositAmountCents),
+        fixedFeeCents: Number(fee.fixedFeeCents),
+        percentageBps: fee.percentageBps,
+        strategy: fee.strategy,
+      });
       const id = randomUUID();
       const reference = `NORTH-${order.commercialNumber}-${id.slice(0, 8)}`;
       await client.query(
         `INSERT INTO payment_charges
            (id,order_id,provider,environment,status,billing_type,amount_cents,due_date,
-            external_reference,created_by)
-         VALUES($1,$2,'ASAAS','SANDBOX','PENDING_CREATION',$3,$4,$5,$6,$7)`,
+            external_reference,fee_policy_id,fee_policy_version,fee_snapshot_id,fee_strategy,
+            estimated_fee_cents,estimated_net_cents,created_by)
+         VALUES($1,$2,'ASAAS','SANDBOX','PENDING_CREATION',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           id,
           orderId,
           input.billingType,
-          order.depositAmountCents,
+          feeCalculation.chargedAmountCents,
           input.dueDate,
           reference,
+          fee.feePolicyId,
+          fee.feePolicyVersion,
+          fee.feeSnapshotId,
+          fee.strategy,
+          feeCalculation.feeCents,
+          feeCalculation.netAmountCents,
           actor.id,
         ],
       );
@@ -753,7 +1268,9 @@ export class FulfillmentRepository {
         after: {
           orderId,
           billingType: input.billingType,
-          amountCents: order.depositAmountCents,
+          amountCents: feeCalculation.chargedAmountCents,
+          feeCents: feeCalculation.feeCents,
+          estimatedNetCents: feeCalculation.netAmountCents,
           dueDate: input.dueDate,
         },
       });
@@ -765,7 +1282,7 @@ export class FulfillmentRepository {
     token: string | undefined,
     body: { id: string; event: string; payment: { id: string; value?: number } },
   ) {
-    const connection = await this.activeConnection();
+    const connection = await this.activeConnection(pool, true);
     const expected = decryptSecret(
       {
         ciphertext: connection.webhookTokenCiphertext,
@@ -845,7 +1362,7 @@ export class FulfillmentRepository {
         const artworkId = randomUUID();
         await client.query(
           `INSERT INTO artwork_versions(id,order_id,version_number,file_id,status,created_by)
-           VALUES($1,$2,$3,$4,'PENDING_CUSTOMER',$5)`,
+           VALUES($1,$2,$3,$4,'DRAFT',$5)`,
           [artworkId, orderId, next.rows[0]!.version, fileId, actor.id],
         );
         await client.query(
@@ -896,6 +1413,115 @@ export class FulfillmentRepository {
     return { ...file, content: await this.storage.get(file.storageKey) };
   }
 
+  async requestArtworkApproval(
+    actor: CurrentActor,
+    artworkId: string,
+    key: string,
+    correlationId: string,
+  ) {
+    return transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: `artwork:${artworkId}:request-approval`,
+        key,
+        payload: { artworkId },
+      });
+      const current = await client.query<{ orderId: string }>(
+        `SELECT order_id AS "orderId" FROM artwork_versions WHERE id=$1 FOR UPDATE`,
+        [artworkId],
+      );
+      const orderId = current.rows[0]?.orderId;
+      if (!orderId) throw new DomainError('ARTWORK_NOT_FOUND', 'Arte não encontrada.', 404);
+      if (locked.replayResourceId) return this.getOrder(orderId, client);
+      const updated = await client.query(
+        `UPDATE artwork_versions SET status='AWAITING_CUSTOMER_APPROVAL',
+           approval_requested_at=clock_timestamp(),approval_requested_by=$3
+         WHERE id=$1 AND order_id=$2 AND status='DRAFT'
+           AND file_id IS NOT NULL`,
+        [artworkId, orderId, actor.id],
+      );
+      if (updated.rowCount !== 1)
+        throw new DomainError(
+          'ARTWORK_REQUEST_CONFLICT',
+          'Somente uma arte em rascunho válida pode ser solicitada.',
+          409,
+        );
+      await recordIdempotency(client, {
+        scope: `artwork:${artworkId}:request-approval`,
+        key,
+        hash: locked.hash,
+        resourceType: 'artwork_version',
+        resourceId: artworkId,
+      });
+      await audit(client, {
+        actorType: 'USER',
+        actorId: actor.id,
+        action: 'ARTWORK_APPROVAL_REQUESTED',
+        resourceType: 'artwork_version',
+        resourceId: artworkId,
+        correlationId,
+        after: { orderId, status: 'AWAITING_CUSTOMER_APPROVAL' },
+      });
+      return this.getOrder(orderId, client);
+    }, 'SERIALIZABLE');
+  }
+
+  async rejectArtwork(
+    actor: CurrentActor,
+    artworkId: string,
+    input: { reason: string; confirmationSource: string; confirmedAt: string },
+    key: string,
+    correlationId: string,
+  ) {
+    return transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: `artwork:${artworkId}:reject`,
+        key,
+        payload: input,
+      });
+      const current = await client.query<{ orderId: string }>(
+        `SELECT order_id AS "orderId" FROM artwork_versions WHERE id=$1 FOR UPDATE`,
+        [artworkId],
+      );
+      const orderId = current.rows[0]?.orderId;
+      if (!orderId) throw new DomainError('ARTWORK_NOT_FOUND', 'Arte não encontrada.', 404);
+      if (locked.replayResourceId) return this.getOrder(orderId, client);
+      const updated = await client.query(
+        `UPDATE artwork_versions SET status='REJECTED',rejected_at=$3,rejected_by=$4,
+           rejection_reason=$5,rejection_confirmation_source=$6
+         WHERE id=$1 AND order_id=$2 AND status='AWAITING_CUSTOMER_APPROVAL'`,
+        [artworkId, orderId, input.confirmedAt, actor.id, input.reason, input.confirmationSource],
+      );
+      if (updated.rowCount !== 1)
+        throw new DomainError(
+          'ARTWORK_REJECTION_CONFLICT',
+          'A arte não está aguardando aprovação do cliente.',
+          409,
+        );
+      await recordIdempotency(client, {
+        scope: `artwork:${artworkId}:reject`,
+        key,
+        hash: locked.hash,
+        resourceType: 'artwork_version',
+        resourceId: artworkId,
+      });
+      await audit(client, {
+        actorType: 'USER',
+        actorId: actor.id,
+        action: 'ARTWORK_REJECTED',
+        resourceType: 'artwork_version',
+        resourceId: artworkId,
+        correlationId,
+        after: {
+          orderId,
+          reasonProvided: true,
+          confirmationSource: input.confirmationSource,
+          confirmedAt: input.confirmedAt,
+        },
+      });
+      return this.getOrder(orderId, client);
+    }, 'SERIALIZABLE');
+  }
+
   async confirmArtwork(
     actor: CurrentActor,
     orderId: string,
@@ -914,7 +1540,7 @@ export class FulfillmentRepository {
       const updated = await client.query(
         `UPDATE artwork_versions SET status='CUSTOMER_CONFIRMED',customer_confirmation_reference=$3,
            customer_confirmed_at=clock_timestamp(),customer_confirmed_by=$4
-         WHERE id=$1 AND order_id=$2 AND status='PENDING_CUSTOMER'`,
+         WHERE id=$1 AND order_id=$2 AND status='AWAITING_CUSTOMER_APPROVAL'`,
         [artworkId, orderId, reference, actor.id],
       );
       if (updated.rowCount !== 1)
@@ -1433,7 +2059,7 @@ export class FulfillmentRepository {
       documentAuthTag: Buffer;
       documentHash: string;
       externalCustomerId: string | null;
-      billingType: 'PIX' | 'BOLETO' | 'UNDEFINED';
+      billingType: BillingType;
       amountCents: string;
       dueDate: string;
       externalReference: string;
@@ -1461,12 +2087,21 @@ export class FulfillmentRepository {
         },
         `customer:${charge.customerId}:billing-document`,
       );
-      const external = await gateway.createCustomer({
-        name: charge.customerName,
-        cpfCnpj: document,
-        externalReference: charge.customerId,
-        notificationDisabled: true,
-      });
+      const existingCustomers = await gateway.findCustomers(charge.customerId);
+      let external = existingCustomers.data[0];
+      if (!external) {
+        try {
+          external = await gateway.createCustomer({
+            name: charge.customerName,
+            cpfCnpj: document,
+            externalReference: charge.customerId,
+            notificationDisabled: true,
+          });
+        } catch (error) {
+          external = (await gateway.findCustomers(charge.customerId)).data[0];
+          if (!external) throw error;
+        }
+      }
       externalCustomerId = external.id;
       await pool.query(
         `INSERT INTO asaas_customer_bindings(id,customer_id,environment,external_customer_id,document_hash)
@@ -1474,18 +2109,27 @@ export class FulfillmentRepository {
         [randomUUID(), charge.customerId, external.id, charge.documentHash],
       );
     }
-    const external = await gateway.createCharge({
-      customer: externalCustomerId,
-      billingType: charge.billingType,
-      value: Number(charge.amountCents) / 100,
-      dueDate: charge.dueDate,
-      externalReference: charge.externalReference,
-    });
+    let external = (await gateway.findCharges(charge.externalReference)).data[0];
+    if (!external) {
+      try {
+        external = await gateway.createCharge({
+          customer: externalCustomerId,
+          billingType: charge.billingType,
+          value: Number(charge.amountCents) / 100,
+          dueDate: charge.dueDate,
+          externalReference: charge.externalReference,
+        });
+      } catch (error) {
+        external = (await gateway.findCharges(charge.externalReference)).data[0];
+        if (!external) throw error;
+      }
+    }
+    const invoiceUrl = safeHostedInvoiceUrl(external.invoiceUrl);
     await transaction(async (client) => {
       await client.query(
         `UPDATE payment_charges SET external_charge_id=$2,status='CREATED',invoice_url=$3,
            version=version+1,updated_at=clock_timestamp() WHERE id=$1 AND status='PENDING_CREATION'`,
-        [chargeId, external.id, external.invoiceUrl ?? external.bankSlipUrl ?? null],
+        [chargeId, external.id, invoiceUrl],
       );
       await audit(client, {
         actorType: 'SYSTEM',
@@ -1529,14 +2173,31 @@ export class FulfillmentRepository {
       const mapped = paymentEventStatus(claimed.eventType);
       await transaction(async (client) => {
         if (mapped) {
-          const result = await client.query<{ id: string; orderId: string; amountCents: string }>(
-            `UPDATE payment_charges SET status=$2,version=version+1,updated_at=clock_timestamp()
-             WHERE external_charge_id=$1 RETURNING id,order_id AS "orderId",amount_cents::text AS "amountCents"`,
-            [claimed.externalChargeId, mapped],
+          const result = await client.query<{
+            id: string;
+            orderId: string;
+            amountCents: string;
+            status: string;
+          }>(
+            `SELECT id,order_id AS "orderId",amount_cents::text AS "amountCents",status
+             FROM payment_charges WHERE external_charge_id=$1 FOR UPDATE`,
+            [claimed.externalChargeId],
           );
           const charge = result.rows[0];
           if (charge) {
-            if (mapped === 'CONFIRMED' || mapped === 'RECEIVED') {
+            const terminal = ['REFUNDED', 'PARTIALLY_REFUNDED', 'CHARGEBACK'].includes(
+              charge.status,
+            );
+            const financialReview = ['REFUNDED', 'PARTIALLY_REFUNDED', 'CHARGEBACK'].includes(
+              mapped,
+            );
+            const appliedStatus = terminal && !financialReview ? charge.status : mapped;
+            await client.query(
+              `UPDATE payment_charges SET status=$2,version=version+1,
+                 provider_last_event_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`,
+              [charge.id, appliedStatus],
+            );
+            if (!terminal && (mapped === 'CONFIRMED' || mapped === 'RECEIVED')) {
               await client.query(
                 `UPDATE orders SET paid_amount_cents=GREATEST(paid_amount_cents,$2),
                 updated_at=clock_timestamp() WHERE id=$1`,
@@ -1551,7 +2212,7 @@ export class FulfillmentRepository {
                 randomUUID(),
               );
             }
-            if (['REFUNDED', 'PARTIALLY_REFUNDED', 'CHARGEBACK'].includes(mapped)) {
+            if (financialReview) {
               const order = await this.orderRow(charge.orderId, client, true);
               if (order.status !== 'CANCELLED' && order.status !== 'FINANCIAL_REVIEW') {
                 assertOrderTransition(order.status, 'FINANCIAL_REVIEW');

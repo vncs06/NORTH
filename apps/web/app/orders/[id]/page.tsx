@@ -20,7 +20,9 @@ interface OrderView {
   customerNameSnapshot: string;
   status: string;
   totalAmountCents: string;
-  depositRateBps: number;
+  depositMode: 'PERCENTAGE' | 'FIXED_AMOUNT';
+  depositRateBps: number | null;
+  depositFixedAmountCents: string | null;
   depositAmountCents: string;
   paidAmountCents: string;
   readiness: { ready: boolean; blockers: string[] };
@@ -46,6 +48,9 @@ interface OrderView {
     amountCents: string;
     dueDate: string;
     invoiceUrl: string | null;
+    feeStrategy: string | null;
+    estimatedFeeCents: string | null;
+    estimatedNetCents: string | null;
   }>;
   artworks: Array<{
     id: string;
@@ -128,6 +133,22 @@ export default function OrderDetailPage() {
     }
   }
 
+  async function artworkAction(artworkId: string, operation: string, body: unknown) {
+    setError('');
+    setSuccess('');
+    try {
+      await api(`/artwork-versions/${artworkId}/${operation}`, {
+        method: 'POST',
+        headers: { 'idempotency-key': idempotencyKey() },
+        body: JSON.stringify(body),
+      });
+      setSuccess('Transição da arte registrada no histórico.');
+      await load();
+    } catch (caught) {
+      setError(message(caught));
+    }
+  }
+
   async function billing(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -201,8 +222,11 @@ export default function OrderDetailPage() {
             Total<strong>{formatMoney(order.totalAmountCents)}</strong>
           </div>
           <div className="metric">
-            Sinal ({order.depositRateBps / 100}%)
-            <strong>{formatMoney(order.depositAmountCents)}</strong>
+            Sinal (
+            {order.depositMode === 'PERCENTAGE'
+              ? `${Number(order.depositRateBps) / 100}%`
+              : 'valor fixo'}
+            )<strong>{formatMoney(order.depositAmountCents)}</strong>
           </div>
           <div className="metric">
             Confirmado<strong>{formatMoney(order.paidAmountCents)}</strong>
@@ -221,8 +245,8 @@ export default function OrderDetailPage() {
             <form className="card" onSubmit={billing}>
               <h3>Documento de cobrança</h3>
               <label>
-                CPF/CNPJ, somente dígitos
-                <input name="cpfCnpj" inputMode="numeric" pattern="\d{11}|\d{14}" required />
+                CPF/CNPJ
+                <input name="cpfCnpj" inputMode="numeric" placeholder="000.000.000-00" required />
               </label>
               <button>Salvar protegido</button>
             </form>
@@ -243,7 +267,7 @@ export default function OrderDetailPage() {
                 <select name="billingType">
                   <option>PIX</option>
                   <option>BOLETO</option>
-                  <option>UNDEFINED</option>
+                  <option value="CREDIT_CARD">CARTÃO — ambiente hospedado</option>
                 </select>
               </label>
               <label>
@@ -376,16 +400,38 @@ export default function OrderDetailPage() {
                   Download autorizado
                 </a>
               </div>
-              {art.status === 'PENDING_CUSTOMER' && (
-                <button
-                  onClick={() =>
-                    void action(`/artworks/${art.id}/customer-confirmation`, {
-                      customerConfirmationReference: 'Confirmação externa registrada pelo operador',
-                    })
-                  }
-                >
-                  Registrar confirmação externa
+              {art.status === 'DRAFT' && (
+                <button onClick={() => void artworkAction(art.id, 'request-approval', {})}>
+                  Solicitar aprovação do cliente
                 </button>
+              )}
+              {art.status === 'AWAITING_CUSTOMER_APPROVAL' && (
+                <>
+                  <button
+                    onClick={() =>
+                      void action(`/artworks/${art.id}/customer-confirmation`, {
+                        customerConfirmationReference:
+                          'Confirmação externa registrada pelo operador',
+                      })
+                    }
+                  >
+                    Registrar confirmação externa
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={() => {
+                      const reason = window.prompt('Motivo confirmado da rejeição:');
+                      if (reason)
+                        void artworkAction(art.id, 'reject', {
+                          reason,
+                          confirmationSource: 'Registro externo conferido pelo gestor',
+                          confirmedAt: new Date().toISOString(),
+                        });
+                    }}
+                  >
+                    Registrar rejeição confirmada
+                  </button>
+                </>
               )}
               {art.status === 'CUSTOMER_CONFIRMED' && (
                 <button
@@ -414,9 +460,16 @@ export default function OrderDetailPage() {
                 <>
                   {' '}
                   ·{' '}
-                  <a href={charge.invoiceUrl} target="_blank" rel="noreferrer">
-                    abrir no Sandbox
+                  <a href={charge.invoiceUrl} target="_blank" rel="noopener noreferrer">
+                    abrir experiência hospedada do Asaas
                   </a>
+                </>
+              )}
+              {charge.estimatedFeeCents && (
+                <>
+                  {' '}
+                  · taxa estimada {formatMoney(charge.estimatedFeeCents)} · líquido previsto{' '}
+                  {formatMoney(charge.estimatedNetCents ?? '0')} · {charge.feeStrategy}
                 </>
               )}
             </div>

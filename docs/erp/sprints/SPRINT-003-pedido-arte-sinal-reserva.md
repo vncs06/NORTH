@@ -2,13 +2,13 @@
 
 ## Estado
 
-`PARCIAL` na branch `sprint-003-pedido-arte-sinal-reserva`, baseada em `b3aa5b5`.
-O núcleo vertical local foi demonstrado por testes unitários, integração PostgreSQL
-e E2E. A homologação real do Asaas Sandbox permanece `BLOQUEADA` por ausência de
-credenciais e URL HTTPS pública injetadas de modo seguro; testes locais usam um stub
-contratual. A matriz do handoff também registra requisitos locais ainda incompletos,
-incluindo taxa Asaas, sinal fixo, cartão hospedado e operações de ciclo de conexão.
-O Sprint 003 não é declarado concluído enquanto essas lacunas não forem resolvidas.
+`PARCIAL` após a revisão corretiva R1 na branch
+`sprint-003-r1-asaas-completion`, baseada em `3da295b`. O incremento local completo
+foi demonstrado por testes unitários, integração PostgreSQL e E2E: sinal fixo,
+consulta e política de taxas, rotação/desconexão, cartão hospedado, CPF/CNPJ, arte,
+stub e os vinte cenários concorrentes. A homologação real do Asaas Sandbox permanece
+`BLOQUEADA` somente pela ausência de credenciais e URL HTTPS pública injetadas de
+modo seguro. O Sprint 003 não é declarado concluído sem essa evidência externa.
 
 ## Objetivo verificável
 
@@ -63,3 +63,22 @@ implementados.
 | Cancelamento libera reserva | movimento `RELEASE` e integração |
 | Migração preserva Sprints 001/002 | verificador dedicado |
 | Homologação real do Sandbox | `BLOQUEADO`: faltam credencial, authToken e URL HTTPS pública |
+
+## Revisão corretiva 003-R1
+
+- sinal versionado nos modos `PERCENTAGE` e `FIXED_AMOUNT`, com snapshot no pedido;
+- `GET /v3/myAccount/fees/` sem corpo, com `access_token`, `User-Agent`, estados e
+  snapshot sanitizado;
+- políticas versionadas `ABSORB`/`PASS_THROUGH` por PIX, boleto e cartão;
+- rotação validada antes da troca e desconexão dependente da remoção do Webhook;
+- cartão limitado à experiência hospedada indicada por URL validada;
+- CPF/CNPJ com dígitos verificadores, HMAC, criptografia e máscara;
+- contratos separados para solicitar e rejeitar arte;
+- stub determinístico e vinte cenários de concorrência com PostgreSQL real;
+- migração incremental `20261107120000_sprint_003_r1_asaas_completion`;
+- preflight real que informa apenas presença/ausência de variáveis.
+
+Documentação oficial do Asaas consultada em 2026-11-07. Não foi identificada
+alteração contratual incompatível com ADR-005: autenticação continua em
+`access_token`, taxas em `/v3/myAccount/fees/`, cobranças são assíncronas e Webhooks
+continuam exigindo idempotência do consumidor.

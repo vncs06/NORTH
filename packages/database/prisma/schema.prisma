@@ -82,8 +82,11 @@ model DepositPolicy {
   id                 String    @id @db.Uuid
   versionNumber      Int       @unique @map("version_number")
   status             String
-  rateBps            Int       @map("rate_bps")
-  minimumAmountCents BigInt    @map("minimum_amount_cents")
+  mode               String
+  rateBps            Int?      @map("rate_bps")
+  minimumAmountCents BigInt?   @map("minimum_amount_cents")
+  fixedAmountCents   BigInt?   @map("fixed_amount_cents")
+  allowAboveTotal    Boolean   @map("allow_above_total")
   effectiveAt        DateTime  @map("effective_at") @db.Timestamptz(6)
   createdBy          String    @map("created_by") @db.Uuid
   archivedAt         DateTime? @map("archived_at") @db.Timestamptz(6)
@@ -103,7 +106,10 @@ model Order {
   totalAmountCents        BigInt    @map("total_amount_cents")
   depositPolicyId         String    @map("deposit_policy_id") @db.Uuid
   depositPolicyVersion    Int       @map("deposit_policy_version")
-  depositRateBps          Int       @map("deposit_rate_bps")
+  depositMode             String    @map("deposit_mode")
+  depositRateBps          Int?      @map("deposit_rate_bps")
+  depositFixedAmountCents BigInt?   @map("deposit_fixed_amount_cents")
+  depositAllowAboveTotal  Boolean   @map("deposit_allow_above_total")
   depositAmountCents      BigInt    @map("deposit_amount_cents")
   paidAmountCents         BigInt    @map("paid_amount_cents")
   currentArtworkVersionId String?   @map("current_artwork_version_id") @db.Uuid
@@ -161,6 +167,13 @@ model PaymentCharge {
   dueDate           DateTime @map("due_date") @db.Date
   invoiceUrl        String?  @map("invoice_url")
   externalReference String   @map("external_reference")
+  feePolicyId       String?  @map("fee_policy_id") @db.Uuid
+  feePolicyVersion  Int?     @map("fee_policy_version")
+  feeSnapshotId     String?  @map("fee_snapshot_id") @db.Uuid
+  feeStrategy       String?  @map("fee_strategy")
+  estimatedFeeCents BigInt?  @map("estimated_fee_cents")
+  estimatedNetCents BigInt?  @map("estimated_net_cents")
+  providerLastEventAt DateTime? @map("provider_last_event_at") @db.Timestamptz(6)
   version           Int
   createdBy         String   @map("created_by") @db.Uuid
   createdAt         DateTime @map("created_at") @db.Timestamptz(6)
@@ -177,10 +190,65 @@ model ArtworkVersion {
   customerConfirmationReference String?   @map("customer_confirmation_reference")
   customerConfirmedAt           DateTime? @map("customer_confirmed_at") @db.Timestamptz(6)
   customerConfirmedBy           String?   @map("customer_confirmed_by") @db.Uuid
+  approvalRequestedAt           DateTime? @map("approval_requested_at") @db.Timestamptz(6)
+  approvalRequestedBy           String?   @map("approval_requested_by") @db.Uuid
+  rejectedAt                    DateTime? @map("rejected_at") @db.Timestamptz(6)
+  rejectedBy                    String?   @map("rejected_by") @db.Uuid
+  rejectionReason               String?   @map("rejection_reason")
+  rejectionConfirmationSource   String?   @map("rejection_confirmation_source")
   createdBy                     String    @map("created_by") @db.Uuid
   createdAt                     DateTime  @map("created_at") @db.Timestamptz(6)
   @@unique([orderId, versionNumber])
   @@map("artwork_versions")
+}
+
+model AsaasConnection {
+  id                    String    @id @db.Uuid
+  environment           String
+  status                String
+  apiKeyCiphertext      Bytes?    @map("api_key_ciphertext")
+  apiKeyNonce           Bytes?    @map("api_key_nonce")
+  apiKeyAuthTag         Bytes?    @map("api_key_auth_tag")
+  webhookTokenCiphertext Bytes?   @map("webhook_token_ciphertext")
+  webhookTokenNonce     Bytes?    @map("webhook_token_nonce")
+  webhookTokenAuthTag   Bytes?    @map("webhook_token_auth_tag")
+  webhookPublicUrl      String    @map("webhook_public_url")
+  keyFingerprint        String    @map("key_fingerprint") @db.Char(12)
+  externalWebhookId     String?   @map("external_webhook_id")
+  lastValidatedAt       DateTime? @map("last_validated_at") @db.Timestamptz(6)
+  disconnectedAt        DateTime? @map("disconnected_at") @db.Timestamptz(6)
+  lastErrorCode         String?   @map("last_error_code")
+  version               Int
+  createdBy             String    @map("created_by") @db.Uuid
+  updatedBy             String    @map("updated_by") @db.Uuid
+  createdAt             DateTime  @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @map("updated_at") @db.Timestamptz(6)
+  @@map("asaas_connections")
+}
+
+model AsaasFeeSnapshot {
+  id               String    @id @db.Uuid
+  connectionId     String    @map("connection_id") @db.Uuid
+  environment      String
+  status           String
+  fetchedAt        DateTime? @map("fetched_at") @db.Timestamptz(6)
+  sanitizedPayload Json      @map("sanitized_payload")
+  errorCode        String?   @map("error_code")
+  createdBy        String?   @map("created_by") @db.Uuid
+  createdAt        DateTime  @map("created_at") @db.Timestamptz(6)
+  @@map("asaas_fee_snapshots")
+}
+
+model PaymentFeePolicy {
+  id             String    @id @db.Uuid
+  versionNumber  Int       @unique @map("version_number")
+  status         String
+  feeSnapshotId  String    @map("fee_snapshot_id") @db.Uuid
+  effectiveAt    DateTime  @map("effective_at") @db.Timestamptz(6)
+  createdBy      String    @map("created_by") @db.Uuid
+  archivedAt     DateTime? @map("archived_at") @db.Timestamptz(6)
+  createdAt      DateTime  @map("created_at") @db.Timestamptz(6)
+  @@map("payment_fee_policies")
 }
 
 model InventoryReservation {

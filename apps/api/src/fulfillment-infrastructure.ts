@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes }
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DomainError } from '@north/domain';
+import { assertHostedInvoiceUrl } from '@north/domain/fulfillment';
 
 export interface EncryptedValue {
   ciphertext: Buffer;
@@ -102,7 +103,7 @@ export interface AsaasCustomerRequest {
 
 export interface AsaasChargeRequest {
   customer: string;
-  billingType: 'PIX' | 'BOLETO' | 'UNDEFINED';
+  billingType: 'PIX' | 'BOLETO' | 'CREDIT_CARD';
   value: number;
   dueDate: string;
   externalReference: string;
@@ -119,31 +120,72 @@ export class AsaasGateway {
     this.baseUrl = configured ?? 'https://api-sandbox.asaas.com/v3';
   }
 
-  private async request<T>(pathname: string, init: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${pathname}`, {
-      ...init,
-      headers: {
+  private async request<T>(pathname: string, init: RequestInit, attempts = 1): Promise<T> {
+    let response: Response;
+    try {
+      const headers: Record<string, string> = {
         accept: 'application/json',
-        'content-type': 'application/json',
         access_token: this.apiKey,
         'user-agent': 'NORTH-ERP/0.1',
-        ...init.headers,
-      },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) {
+        ...(init.headers as Record<string, string> | undefined),
+      };
+      if (process.env.NODE_ENV === 'test' && process.env.ASAAS_STUB_SCENARIO) {
+        headers['x-stub-scenario'] = process.env.ASAAS_STUB_SCENARIO;
+      }
+      if (init.body !== undefined) headers['content-type'] = 'application/json';
+      response = await fetch(`${this.baseUrl}${pathname}`, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      if (attempts > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return this.request(pathname, init, attempts - 1);
+      }
       throw new DomainError(
-        'ASAAS_REQUEST_FAILED',
-        'O Asaas recusou ou não concluiu a operação.',
-        502,
-        { providerStatus: response.status },
+        'ASAAS_TIMEOUT',
+        'O Asaas não respondeu dentro do tempo esperado.',
+        504,
+        { cause: error instanceof Error ? error.name : 'network' },
       );
+    }
+    if (!response.ok) {
+      if ((response.status === 429 || response.status >= 500) && attempts > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return this.request(pathname, init, attempts - 1);
+      }
+      const code =
+        response.status === 401
+          ? 'ASAAS_INVALID_API_KEY'
+          : response.status === 403
+            ? 'ASAAS_ACCESS_FORBIDDEN'
+            : response.status === 429
+              ? 'ASAAS_RATE_LIMITED'
+              : response.status >= 500
+                ? 'ASAAS_UNAVAILABLE'
+                : 'ASAAS_REQUEST_REJECTED';
+      throw new DomainError(code, 'O Asaas recusou ou não concluiu a operação.', 502, {
+        providerStatus: response.status,
+      });
     }
     return (await response.json()) as T;
   }
 
   createCustomer(input: AsaasCustomerRequest): Promise<{ id: string }> {
     return this.request('/customers', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  getCustomer(id: string): Promise<{ id: string }> {
+    return this.request(`/customers/${encodeURIComponent(id)}`, { method: 'GET' }, 3);
+  }
+
+  findCustomers(externalReference: string): Promise<{ data: Array<{ id: string }> }> {
+    return this.request(
+      `/customers?externalReference=${encodeURIComponent(externalReference)}`,
+      { method: 'GET' },
+      3,
+    );
   }
 
   createCharge(input: AsaasChargeRequest): Promise<{
@@ -154,6 +196,107 @@ export class AsaasGateway {
   }> {
     return this.request('/payments', { method: 'POST', body: JSON.stringify(input) });
   }
+
+  getCharge(id: string): Promise<{ id: string; status: string; invoiceUrl?: string }> {
+    return this.request(`/payments/${encodeURIComponent(id)}`, { method: 'GET' }, 3);
+  }
+
+  findCharges(externalReference: string): Promise<{
+    data: Array<{ id: string; status: string; invoiceUrl?: string }>;
+  }> {
+    return this.request(
+      `/payments?externalReference=${encodeURIComponent(externalReference)}`,
+      { method: 'GET' },
+      3,
+    );
+  }
+
+  getFees(): Promise<Record<string, unknown>> {
+    return this.request('/myAccount/fees/', { method: 'GET' }, 3);
+  }
+
+  createWebhook(input: {
+    name: string;
+    url: string;
+    authToken: string;
+    events: string[];
+  }): Promise<{ id: string }> {
+    return this.request('/webhooks', { method: 'POST', body: JSON.stringify(input) }, 3);
+  }
+
+  deleteWebhook(id: string): Promise<void> {
+    return this.request(`/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' }, 3);
+  }
+}
+
+function decimalToInteger(value: unknown, scale: number): number {
+  const text =
+    typeof value === 'number' ? value.toString() : typeof value === 'string' ? value : '0';
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(text);
+  if (!match) return 0;
+  const decimals = Math.log10(scale);
+  const fraction = (match[2] ?? '').padEnd(decimals + 1, '0');
+  const base = BigInt(match[1]!) * BigInt(scale) + BigInt(fraction.slice(0, decimals) || '0');
+  const rounded = Number(fraction[decimals] ?? '0') >= 5 ? base + 1n : base;
+  return Number(rounded);
+}
+
+export interface NormalizedAsaasFee {
+  billingType: 'PIX' | 'BOLETO' | 'CREDIT_CARD';
+  fixedFeeCents: number;
+  percentageBps: number;
+  settlementDays: number | null;
+  conditions: Record<string, unknown>;
+}
+
+export function normalizeAsaasFees(payload: Record<string, unknown>): NormalizedAsaasFee[] {
+  const object = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const payment = object(payload.payment);
+  const pix = object(payment.pix ?? payload.pix ?? payload.pixCreditFee);
+  const boleto = object(
+    payment.bankSlip ?? payload.bankSlip ?? payload.bankSlipFee ?? payload.boleto,
+  );
+  const card = object(payment.creditCard ?? payload.creditCard ?? payload.creditCardFee);
+  const item = (
+    billingType: NormalizedAsaasFee['billingType'],
+    source: Record<string, unknown>,
+  ): NormalizedAsaasFee => ({
+    billingType,
+    fixedFeeCents: decimalToInteger(
+      source.fixedValue ??
+        source.fixedFeeValue ??
+        source.defaultValue ??
+        source.operationValue ??
+        source.value ??
+        source.fee ??
+        source.fixedFee ??
+        0,
+      100,
+    ),
+    percentageBps: decimalToInteger(
+      source.percentage ??
+        source.oneInstallmentPercentage ??
+        source.percent ??
+        source.percentageFee ??
+        0,
+      100,
+    ),
+    settlementDays:
+      typeof (source.settlementDays ?? source.days) === 'number'
+        ? Number(source.settlementDays ?? source.days)
+        : null,
+    conditions: Object.fromEntries(
+      Object.entries(source).filter(([key]) => !/token|key|secret|authorization/i.test(key)),
+    ),
+  });
+  return [item('PIX', pix), item('BOLETO', boleto), item('CREDIT_CARD', card)];
+}
+
+export function safeHostedInvoiceUrl(value: string | undefined): string | null {
+  return value ? assertHostedInvoiceUrl(value, 'SANDBOX') : null;
 }
 
 export function validateArtworkContent(mimeType: string, content: Buffer): void {

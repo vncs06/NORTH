@@ -18,6 +18,7 @@ import { QuoteRepository } from './quote-repository.js';
 import { NorthRepository } from './repository.js';
 import {
   AsaasConfigurationController,
+  ArtworkVersionsController,
   AsaasWebhookController,
   CustomerBillingController,
   OrdersController,
@@ -39,6 +40,7 @@ import { FulfillmentRepository } from './fulfillment-repository.js';
     CustomerBillingController,
     OrderSettingsController,
     AsaasConfigurationController,
+    ArtworkVersionsController,
     AsaasWebhookController,
     OrdersController,
   ],

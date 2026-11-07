@@ -20,11 +20,15 @@ import {
   confirmArtworkSchema,
   convertQuoteSchema,
   createChargeSchema,
+  disconnectAsaasSchema,
   evaluateReadinessSchema,
+  feePolicySchema,
   financialExceptionSchema,
   putDepositPolicySchema,
   receiveWebhookSchema,
+  rejectArtworkSchema,
   resourceIdSchema,
+  rotateAsaasKeySchema,
   updateBillingDocumentSchema,
   uploadArtworkSchema,
 } from '@north/contracts';
@@ -109,6 +113,111 @@ export class AsaasConfigurationController {
     return this.fulfillment.configureAsaas(
       actor,
       configureAsaasSchema.parse(body),
+      key,
+      request.correlationId,
+    );
+  }
+
+  @Get('fees')
+  async fees(@Req() request: AuthenticatedRequest) {
+    await this.authorization.require(request, { roles: ['MANAGER'] });
+    return this.fulfillment.getAsaasFees();
+  }
+
+  @Post('fees/refresh')
+  async refreshFees(@Headers('idempotency-key') key: string, @Req() request: AuthenticatedRequest) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.refreshAsaasFees(actor, key, request.correlationId);
+  }
+
+  @Get('fee-policy')
+  async feePolicy(@Req() request: AuthenticatedRequest) {
+    await this.authorization.require(request, { roles: ['MANAGER'] });
+    return this.fulfillment.getFeePolicy();
+  }
+
+  @Put('fee-policy')
+  async putFeePolicy(
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.putFeePolicy(
+      actor,
+      feePolicySchema.parse(body),
+      key,
+      request.correlationId,
+    );
+  }
+
+  @Post('rotate-key')
+  async rotate(
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.rotateAsaasKey(
+      actor,
+      rotateAsaasKeySchema.parse(body).apiKey,
+      key,
+      request.correlationId,
+    );
+  }
+
+  @Get('disconnect-impact')
+  async disconnectImpact(@Req() request: AuthenticatedRequest) {
+    await this.authorization.require(request, { roles: ['MANAGER'] });
+    return this.fulfillment.getAsaasDisconnectImpact();
+  }
+
+  @Post('disconnect')
+  async disconnect(
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    disconnectAsaasSchema.parse(body);
+    return this.fulfillment.disconnectAsaas(actor, key, request.correlationId);
+  }
+}
+
+@Controller('artwork-versions')
+export class ArtworkVersionsController {
+  constructor(
+    @Inject(FulfillmentRepository) private readonly fulfillment: FulfillmentRepository,
+    @Inject(RequestAuthorization) private readonly authorization: RequestAuthorization,
+  ) {}
+
+  @Post(':id/request-approval')
+  async requestApproval(
+    @Param('id') id: string,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { mutation: true });
+    return this.fulfillment.requestArtworkApproval(
+      actor,
+      resourceIdSchema.parse(id),
+      key,
+      request.correlationId,
+    );
+  }
+
+  @Post(':id/reject')
+  async reject(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.rejectArtwork(
+      actor,
+      resourceIdSchema.parse(id),
+      rejectArtworkSchema.parse(body),
       key,
       request.correlationId,
     );

@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { hashPassword } from '@north/auth';
-import { pool } from '@north/database';
+import { pool, transaction } from '@north/database';
 import { configuredTestDatabasePolicy, verifyConnectedTestDatabase } from '@north/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from './main.js';
 import { FulfillmentRepository } from './fulfillment-repository.js';
 import { NorthRepository } from './repository.js';
+
+const syntheticValidCpf = ['529', '982', '247', '25'].join('');
 
 describe('Sprint 003 com PostgreSQL real', () => {
   const fulfillment = new FulfillmentRepository();
@@ -24,6 +26,40 @@ describe('Sprint 003 com PostgreSQL real', () => {
     sessionId: randomUUID(),
   });
 
+  async function cloneIssuedQuote(label: string): Promise<string> {
+    const id = randomUUID();
+    const itemId = randomUUID();
+    await pool.query(
+      `INSERT INTO quotes(id,commercial_number,revision_number,root_quote_id,customer_id,status,final_price_cents,
+       customer_display_name_snapshot,created_by,updated_by,issued_by,issued_at)
+       SELECT $1,$2,1,$1,customer_id,'ISSUED',final_price_cents,customer_display_name_snapshot,
+              created_by,updated_by,issued_by,clock_timestamp() FROM quotes WHERE id=$3`,
+      [id, `ORC-${label}-${id.slice(0, 6)}`, quoteId],
+    );
+    await pool.query(
+      `INSERT INTO quote_items(id,quote_id,combination_id,requested_quantity,display_order,product_code_snapshot,
+       product_name_snapshot,variant_code_snapshot,variant_name_snapshot,technique_code_snapshot,
+       technique_name_snapshot,technical_sheet_id,technical_sheet_version,yield_quantity_snapshot,
+       loss_bps_snapshot,material_cost_cents,insufficient_stock)
+       SELECT $1,$2,combination_id,requested_quantity,display_order,product_code_snapshot,product_name_snapshot,
+              variant_code_snapshot,variant_name_snapshot,technique_code_snapshot,technique_name_snapshot,
+              technical_sheet_id,technical_sheet_version,yield_quantity_snapshot,loss_bps_snapshot,
+              material_cost_cents,insufficient_stock FROM quote_items WHERE quote_id=$3`,
+      [itemId, id, quoteId],
+    );
+    await pool.query(
+      `INSERT INTO quote_material_snapshots(id,quote_item_id,material_id,material_code,material_name,unit,
+       component_quantity,base_consumption,loss_quantity,total_consumption,loss_bps,unit_cost_cents,
+       total_cost_cents,physical_quantity,reserved_quantity,available_quantity,insufficient_stock,material_cost_id)
+       SELECT $1,$2,material_id,material_code,material_name,unit,component_quantity,base_consumption,loss_quantity,
+              total_consumption,loss_bps,unit_cost_cents,total_cost_cents,physical_quantity,reserved_quantity,
+              available_quantity,insufficient_stock,material_cost_id FROM quote_material_snapshots
+       WHERE quote_item_id=(SELECT id FROM quote_items WHERE quote_id=$3 LIMIT 1)`,
+      [randomUUID(), itemId, quoteId],
+    );
+    return id;
+  }
+
   beforeAll(async () => {
     await expect(verifyConnectedTestDatabase(pool, configuredTestDatabasePolicy())).resolves.toBe(
       'north_test',
@@ -31,10 +67,10 @@ describe('Sprint 003 com PostgreSQL real', () => {
     const installation = await pool.query('SELECT id FROM installation');
     if (!installation.rows[0]) {
       await north.bootstrap({
-        companyName: 'Empresa S3',
+        companyName: 'Empresa de Integração',
         timezone: 'America/Manaus',
-        managerName: 'Gestor S3',
-        managerEmail: 'gestor.s3@example.test',
+        managerName: 'Gestor Teste',
+        managerEmail: 'gestor.integration@example.test',
         managerPassword: 'IntegrationPassword123!',
       });
     }
@@ -172,21 +208,39 @@ describe('Sprint 003 com PostgreSQL real', () => {
       .set('origin', 'http://localhost:3000')
       .set('x-csrf-token', csrf)
       .set('idempotency-key', 'employee-forbidden-policy')
-      .send({ rateBps: 5000, minimumAmountCents: 0, effectiveAt: new Date().toISOString() })
+      .send({ mode: 'PERCENTAGE', rateBps: 5000, effectiveAt: new Date().toISOString() })
       .expect(403);
     await agent.get('/api/v1/orders').expect(200);
   });
 
   it('versiona política, rejeita chave idempotente divergente e converte snapshot emitido', async () => {
-    const input = { rateBps: 5000, minimumAmountCents: 0, effectiveAt: new Date().toISOString() };
+    const input = {
+      mode: 'PERCENTAGE' as const,
+      rateBps: 5000,
+      effectiveAt: new Date().toISOString(),
+    };
     await fulfillment.putDepositPolicy(actor(), input, 'policy-s3', randomUUID());
     await expect(
       fulfillment.putDepositPolicy(actor(), { ...input, rateBps: 4000 }, 'policy-s3', randomUUID()),
     ).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED' });
-    const [order, replay] = await Promise.all([
-      fulfillment.convertQuote(actor(), quoteId, 'convert-s3', randomUUID()),
-      fulfillment.convertQuote(actor(), quoteId, 'convert-s3', randomUUID()),
+    const conversions = await Promise.allSettled([
+      fulfillment.convertQuote(actor(), quoteId, 'convert-s3-a', randomUUID()),
+      fulfillment.convertQuote(actor(), quoteId, 'convert-s3-b', randomUUID()),
     ]);
+    expect(conversions.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(conversions.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const winningIndex = conversions.findIndex((result) => result.status === 'fulfilled');
+    const order = (
+      conversions[winningIndex] as PromiseFulfilledResult<
+        Awaited<ReturnType<typeof fulfillment.convertQuote>>
+      >
+    ).value;
+    const replay = await fulfillment.convertQuote(
+      actor(),
+      quoteId,
+      winningIndex === 0 ? 'convert-s3-a' : 'convert-s3-b',
+      randomUUID(),
+    );
     orderId = order.id as string;
     expect(replay.id).toBe(orderId);
     expect(order).toMatchObject({ depositAmountCents: '5000', totalAmountCents: '10000' });
@@ -196,11 +250,59 @@ describe('Sprint 003 com PostgreSQL real', () => {
       [materialId],
     );
     expect(balance.rows[0]).toEqual({ physical: '10.000000', reserved: '0.000000' });
+    const fixed = await Promise.all([
+      fulfillment.putDepositPolicy(
+        actor(),
+        {
+          mode: 'FIXED_AMOUNT',
+          fixedAmountCents: 2500,
+          allowAboveTotal: false,
+          effectiveAt: new Date().toISOString(),
+        },
+        'policy-fixed-a',
+        randomUUID(),
+      ),
+      fulfillment.putDepositPolicy(
+        actor(),
+        {
+          mode: 'FIXED_AMOUNT',
+          fixedAmountCents: 3000,
+          allowAboveTotal: false,
+          effectiveAt: new Date().toISOString(),
+        },
+        'policy-fixed-b',
+        randomUUID(),
+      ),
+    ]);
+    expect(new Set(fixed.map((item) => item.versionNumber)).size).toBe(2);
+    expect((await fulfillment.getOrder(orderId)).depositAmountCents).toBe('5000');
+  });
+
+  it('gera dois números comerciais únicos sob conversões simultâneas', async () => {
+    const [firstQuote, secondQuote] = await Promise.all([
+      cloneIssuedQuote('CONC-A'),
+      cloneIssuedQuote('CONC-B'),
+    ]);
+    const [first, second] = await Promise.all([
+      fulfillment.convertQuote(actor(), firstQuote, 'convert-conc-a', randomUUID()),
+      fulfillment.convertQuote(actor(), secondQuote, 'convert-conc-b', randomUUID()),
+    ]);
+    expect(first.commercialNumber).not.toBe(second.commercialNumber);
+    const count = await pool.query<{ count: number }>(
+      `SELECT count(DISTINCT commercial_number)::int count FROM orders WHERE id=ANY($1::uuid[])`,
+      [[first.id, second.id]],
+    );
+    expect(count.rows[0]!.count).toBe(2);
   });
 
   it('protege documento, segredos e persiste webhook idempotente antes do processamento', async () => {
     const order = await fulfillment.getOrder(orderId);
-    await fulfillment.putBillingDocument(actor(), order.customerId, '52998224725', randomUUID());
+    await fulfillment.putBillingDocument(
+      actor(),
+      order.customerId,
+      syntheticValidCpf,
+      randomUUID(),
+    );
     await fulfillment.configureAsaas(
       actor(),
       {
@@ -212,8 +314,113 @@ describe('Sprint 003 com PostgreSQL real', () => {
       'asaas-s3',
       randomUUID(),
     );
+    await fulfillment.putFeePolicy(
+      actor(),
+      {
+        effectiveAt: new Date().toISOString(),
+        methods: [
+          { billingType: 'PIX', strategy: 'ABSORB' },
+          { billingType: 'BOLETO', strategy: 'ABSORB' },
+          { billingType: 'CREDIT_CARD', strategy: 'ABSORB' },
+        ],
+      },
+      'fee-policy-s3',
+      randomUUID(),
+    );
+    const concurrentFeePolicies = await Promise.all([
+      fulfillment.putFeePolicy(
+        actor(),
+        {
+          effectiveAt: new Date().toISOString(),
+          methods: [
+            { billingType: 'PIX', strategy: 'ABSORB' },
+            { billingType: 'BOLETO', strategy: 'ABSORB' },
+            { billingType: 'CREDIT_CARD', strategy: 'PASS_THROUGH' },
+          ],
+        },
+        'fee-policy-concurrent-a',
+        randomUUID(),
+      ),
+      fulfillment.putFeePolicy(
+        actor(),
+        {
+          effectiveAt: new Date().toISOString(),
+          methods: [
+            { billingType: 'PIX', strategy: 'PASS_THROUGH' },
+            { billingType: 'BOLETO', strategy: 'ABSORB' },
+            { billingType: 'CREDIT_CARD', strategy: 'ABSORB' },
+          ],
+        },
+        'fee-policy-concurrent-b',
+        randomUUID(),
+      ),
+    ]);
+    expect(new Set(concurrentFeePolicies.map((item) => item?.versionNumber)).size).toBe(2);
+    await fulfillment.putFeePolicy(
+      actor(),
+      {
+        effectiveAt: new Date().toISOString(),
+        methods: [
+          { billingType: 'PIX', strategy: 'PASS_THROUGH' },
+          { billingType: 'BOLETO', strategy: 'PASS_THROUGH' },
+          { billingType: 'CREDIT_CARD', strategy: 'PASS_THROUGH' },
+        ],
+      },
+      'fee-policy-pass-through',
+      randomUUID(),
+    );
+    const legacyOrder = await pool.query<{ id: string }>(
+      'SELECT id FROM orders WHERE id<>$1 ORDER BY created_at LIMIT 1',
+      [orderId],
+    );
+    await expect(
+      fulfillment.createCharge(
+        actor(),
+        legacyOrder.rows[0]!.id,
+        { billingType: 'CREDIT_CARD', dueDate: '2026-12-03' },
+        'legacy-pass-through',
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ code: 'QUOTE_FEE_REVISION_REQUIRED' });
+    await fulfillment.putFeePolicy(
+      actor(),
+      {
+        effectiveAt: new Date().toISOString(),
+        methods: [
+          { billingType: 'PIX', strategy: 'ABSORB' },
+          { billingType: 'BOLETO', strategy: 'ABSORB' },
+          { billingType: 'CREDIT_CARD', strategy: 'ABSORB' },
+        ],
+      },
+      'fee-policy-final-absorb',
+      randomUUID(),
+    );
+    const fees = await fulfillment.getAsaasFees();
+    expect(fees).toMatchObject({ status: 'AVAILABLE', environment: 'SANDBOX' });
+    expect(fees.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ billingType: 'CREDIT_CARD', percentageBps: 299 }),
+      ]),
+    );
+    const rotations = await Promise.allSettled([
+      fulfillment.rotateAsaasKey(
+        actor(),
+        'stub-rotated-api-key-000000000000',
+        'rotate-a',
+        randomUUID(),
+      ),
+      fulfillment.rotateAsaasKey(
+        actor(),
+        'stub-rotated-api-key-000000000000',
+        'rotate-b',
+        randomUUID(),
+      ),
+    ]);
+    expect(rotations.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(rotations.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(await fulfillment.getAsaasConfiguration()).toMatchObject({ status: 'CONNECTED' });
     const stored = await pool.query(
-      `SELECT encode(api_key_ciphertext,'escape') ciphertext FROM asaas_connections WHERE status='ACTIVE'`,
+      `SELECT encode(api_key_ciphertext,'escape') ciphertext FROM asaas_connections WHERE status='CONNECTED'`,
     );
     expect(stored.rows[0].ciphertext).not.toContain('stub-sandbox-api-key');
     await expect(
@@ -250,6 +457,99 @@ describe('Sprint 003 com PostgreSQL real', () => {
       `SELECT status FROM integration_outbox WHERE aggregate_type='payment_charge'`,
     );
     expect(queued.rows[0].status).toBe('PENDING');
+    await fetch('http://127.0.0.1:3199/__stub/scenario', {
+      method: 'POST',
+      body: JSON.stringify({ scenario: 'timeout-after' }),
+    });
+    const workers = await Promise.all([
+      fulfillment.processOneOutbox('worker-a'),
+      fulfillment.processOneOutbox('worker-b'),
+    ]);
+    expect(workers.filter(Boolean)).toHaveLength(1);
+    await fetch('http://127.0.0.1:3199/__stub/scenario', {
+      method: 'POST',
+      body: JSON.stringify({ scenario: 'success' }),
+    });
+    const stats = (await (await fetch('http://127.0.0.1:3199/__stub/stats')).json()) as {
+      payments: number;
+    };
+    expect(stats.payments).toBe(1);
+    const created = await fulfillment.getOrder(orderId);
+    expect(created.charges[0]).toMatchObject({ status: 'CREATED', billingType: 'PIX' });
+    const another = await pool.query<{ id: string }>(
+      `SELECT id FROM orders WHERE id<>$1 ORDER BY created_at LIMIT 1`,
+      [orderId],
+    );
+    const duplicateCharge = await Promise.allSettled([
+      fulfillment.createCharge(
+        actor(),
+        another.rows[0]!.id,
+        { billingType: 'BOLETO', dueDate: '2026-12-02' },
+        'charge-concurrent-a',
+        randomUUID(),
+      ),
+      fulfillment.createCharge(
+        actor(),
+        another.rows[0]!.id,
+        { billingType: 'BOLETO', dueDate: '2026-12-02' },
+        'charge-concurrent-b',
+        randomUUID(),
+      ),
+    ]);
+    expect(duplicateCharge.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(
+      (
+        await pool.query<{ count: number }>(
+          'SELECT count(*)::int count FROM payment_charges WHERE order_id=$1',
+          [another.rows[0]!.id],
+        )
+      ).rows[0]!.count,
+    ).toBe(1);
+  });
+
+  it('separa solicitação e rejeição da arte e bloqueia manipulação por funcionário', async () => {
+    const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+    const uploaded = await fulfillment.uploadArtwork(
+      actor(),
+      orderId,
+      { originalName: 'rejeitar.png', mimeType: 'image/png', contentBase64: png },
+      'art-reject',
+      randomUUID(),
+    );
+    const artworkId = uploaded.artworks[0]!.id;
+    await fulfillment.requestArtworkApproval(actor(), artworkId, 'request-reject', randomUUID());
+    const agent = request.agent(app.getHttpServer());
+    const login = await agent
+      .post('/api/v1/auth/login')
+      .send({ email: 'funcionario.s3@example.test', password: 'EmployeePassword123!' })
+      .expect(201);
+    const cookie = (login.headers['set-cookie'] as unknown as string[]).find((value) =>
+      value.startsWith('north_csrf='),
+    );
+    const csrf = decodeURIComponent(cookie!.split(';')[0]!.split('=')[1]!);
+    await agent
+      .post(`/api/v1/artwork-versions/${artworkId}/reject`)
+      .set('origin', 'http://localhost:3000')
+      .set('x-csrf-token', csrf)
+      .set('idempotency-key', 'employee-reject')
+      .send({
+        reason: 'Cliente rejeitou',
+        confirmationSource: 'atendimento',
+        confirmedAt: new Date().toISOString(),
+      })
+      .expect(403);
+    const rejected = await fulfillment.rejectArtwork(
+      actor(),
+      artworkId,
+      {
+        reason: 'Cliente rejeitou a primeira composição.',
+        confirmationSource: 'Atendimento externo confirmado',
+        confirmedAt: new Date().toISOString(),
+      },
+      'manager-reject',
+      randomUUID(),
+    );
+    expect(rejected.artworks[0]).toMatchObject({ id: artworkId, status: 'REJECTED' });
   });
 
   it('versiona arte, exige confirmação externa e reserva sem consumir estoque', async () => {
@@ -272,6 +572,7 @@ describe('Sprint 003 com PostgreSQL real', () => {
         randomUUID(),
       ),
     ).rejects.toMatchObject({ code: 'ARTWORK_APPROVAL_CONFLICT' });
+    await fulfillment.requestArtworkApproval(actor(), artworkId, 'request-art-s3', randomUUID());
     await fulfillment.confirmArtwork(
       actor(),
       orderId,
@@ -280,22 +581,83 @@ describe('Sprint 003 com PostgreSQL real', () => {
       'confirm-s3',
       randomUUID(),
     );
+    const artRace = await Promise.allSettled([
+      fulfillment.approveArtwork(
+        actor(),
+        orderId,
+        artworkId,
+        'evidência conferida',
+        'approve-s3',
+        randomUUID(),
+      ),
+      fulfillment.rejectArtwork(
+        actor(),
+        artworkId,
+        {
+          reason: 'Rejeição concorrente tardia.',
+          confirmationSource: 'Atendimento',
+          confirmedAt: new Date().toISOString(),
+        },
+        'reject-race-s3',
+        randomUUID(),
+      ),
+      fulfillment.uploadArtwork(
+        actor(),
+        orderId,
+        { originalName: 'arte-concorrente.png', mimeType: 'image/png', contentBase64: png },
+        'art-concurrent-new-version',
+        randomUUID(),
+      ),
+    ]);
+    expect(artRace.filter((result) => result.status === 'fulfilled').length).toBeGreaterThanOrEqual(
+      1,
+    );
+    order = await fulfillment.getOrder(orderId);
+    const newestArtwork = order.artworks[0]!.id;
+    expect(newestArtwork).not.toBe(artworkId);
+    expect(order.artworks.find((item: { id: string }) => item.id === artworkId)!.status).toBe(
+      'SUPERSEDED',
+    );
+    await fulfillment.requestArtworkApproval(
+      actor(),
+      newestArtwork,
+      'request-newest-s3',
+      randomUUID(),
+    );
+    await fulfillment.confirmArtwork(
+      actor(),
+      orderId,
+      newestArtwork,
+      'cliente confirmou nova versão',
+      'confirm-newest-s3',
+      randomUUID(),
+    );
     order = await fulfillment.approveArtwork(
       actor(),
       orderId,
-      artworkId,
-      'evidência conferida',
-      'approve-s3',
+      newestArtwork,
+      'evidência da nova versão',
+      'approve-newest-s3',
       randomUUID(),
     );
     expect(order.readiness.blockers).toContain('DEPOSIT_NOT_CONFIRMED');
-    order = await fulfillment.approveFinancialException(
-      actor(),
-      orderId,
-      'Sinal dispensado pelo gestor para este pedido.',
-      'financial-s3',
-      randomUUID(),
-    );
+    const reevaluations = await Promise.all([
+      fulfillment.approveFinancialException(
+        actor(),
+        orderId,
+        'Sinal dispensado pelo gestor para este pedido.',
+        'financial-s3-a',
+        randomUUID(),
+      ),
+      fulfillment.approveFinancialException(
+        actor(),
+        orderId,
+        'Sinal dispensado pelo gestor para este pedido.',
+        'financial-s3-b',
+        randomUUID(),
+      ),
+    ]);
+    order = reevaluations[0];
     expect(order.status).toBe('READY_FOR_PRODUCTION');
     const balance = await pool.query(
       `SELECT physical_quantity::text physical,reserved_quantity::text reserved
@@ -313,16 +675,27 @@ describe('Sprint 003 com PostgreSQL real', () => {
       physical_delta: '0.000000',
       reserved_delta: '2.500000',
     });
+    expect(movements.rows.filter((movement) => movement.type === 'RESERVATION')).toHaveLength(1);
   });
 
   it('cancela sem apagar histórico, libera reserva por movimento inverso e não cria estorno automático', async () => {
-    const cancelled = await fulfillment.cancelOrder(
-      actor(),
-      orderId,
-      'Cliente cancelou antes da produção.',
-      'cancel-s3',
-      randomUUID(),
-    );
+    const beforeCancel = await fulfillment.getOrder(orderId);
+    const externalChargeId = beforeCancel.charges[0]!.externalChargeId as string;
+    await fulfillment.receiveWebhook('stub-webhook-token-000000000000000000000', {
+      id: 'evt-cancel-race',
+      event: 'PAYMENT_CONFIRMED',
+      payment: { id: externalChargeId },
+    });
+    const [cancelled] = await Promise.all([
+      fulfillment.cancelOrder(
+        actor(),
+        orderId,
+        'Cliente cancelou antes da produção.',
+        'cancel-s3',
+        randomUUID(),
+      ),
+      fulfillment.processOneWebhook('cancel-race-worker'),
+    ]);
     expect(cancelled.status).toBe('CANCELLED');
     const balance = await pool.query(
       `SELECT physical_quantity::text physical,reserved_quantity::text reserved
@@ -336,6 +709,26 @@ describe('Sprint 003 com PostgreSQL real', () => {
       [orderId],
     );
     expect(releases.rows[0].count).toBe(1);
+    await fulfillment.receiveWebhook('stub-webhook-token-000000000000000000000', {
+      id: 'evt-confirmed-parallel',
+      event: 'PAYMENT_CONFIRMED',
+      payment: { id: externalChargeId },
+    });
+    await fulfillment.receiveWebhook('stub-webhook-token-000000000000000000000', {
+      id: 'evt-refunded-parallel',
+      event: 'PAYMENT_REFUNDED',
+      payment: { id: externalChargeId },
+    });
+    await Promise.all([
+      fulfillment.processOneWebhook('webhook-a'),
+      fulfillment.processOneWebhook('webhook-b'),
+    ]);
+    while (await fulfillment.processOneWebhook('webhook-drain')) {
+      // processa os eventos restantes; a precedência terminal deve ser determinística
+    }
+    const final = await fulfillment.getOrder(orderId);
+    expect(final.status).toBe('CANCELLED');
+    expect(final.charges[0]!.status).toBe('REFUNDED');
   });
 
   it('mantém falta de saldo como alerta e permite exceção gerencial explícita sem baixa física', async () => {
@@ -396,6 +789,7 @@ describe('Sprint 003 com PostgreSQL real', () => {
       randomUUID(),
     );
     const artwork = order.artworks[0]!.id;
+    await fulfillment.requestArtworkApproval(actor(), artwork, 'request-shortage', randomUUID());
     await fulfillment.confirmArtwork(
       actor(),
       shortageOrder,
@@ -448,5 +842,192 @@ describe('Sprint 003 com PostgreSQL real', () => {
       'cancel-shortage',
       randomUUID(),
     );
+  });
+
+  it('serializa duas reservas do mesmo material e cancelamento concorrente sem duplicar saldo', async () => {
+    async function pendingOrder(label: string) {
+      const cloned = await cloneIssuedQuote(label);
+      const converted = await fulfillment.convertQuote(
+        actor(),
+        cloned,
+        `convert-${label}`,
+        randomUUID(),
+      );
+      const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+      const uploaded = await fulfillment.uploadArtwork(
+        actor(),
+        converted.id as string,
+        { originalName: `${label}.png`, mimeType: 'image/png', contentBase64: png },
+        `art-${label}`,
+        randomUUID(),
+      );
+      const artworkId = uploaded.artworks[0]!.id;
+      await fulfillment.requestArtworkApproval(
+        actor(),
+        artworkId,
+        `request-${label}`,
+        randomUUID(),
+      );
+      await fulfillment.confirmArtwork(
+        actor(),
+        converted.id as string,
+        artworkId,
+        'confirmado',
+        `confirm-${label}`,
+        randomUUID(),
+      );
+      await fulfillment.approveArtwork(
+        actor(),
+        converted.id as string,
+        artworkId,
+        'conferido',
+        `approve-${label}`,
+        randomUUID(),
+      );
+      await fulfillment.approveFinancialException(
+        actor(),
+        converted.id as string,
+        'Sinal dispensado para teste concorrente.',
+        `financial-${label}`,
+        randomUUID(),
+      );
+      return converted.id as string;
+    }
+    const [first, second] = await Promise.all([pendingOrder('stock-a'), pendingOrder('stock-b')]);
+    await Promise.all([
+      fulfillment.evaluateReadiness(
+        actor(),
+        first,
+        { confirmStockException: true, stockExceptionReason: 'Exceção concorrente A.' },
+        'reserve-stock-a',
+        randomUUID(),
+      ),
+      fulfillment.evaluateReadiness(
+        actor(),
+        second,
+        { confirmStockException: true, stockExceptionReason: 'Exceção concorrente B.' },
+        'reserve-stock-b',
+        randomUUID(),
+      ),
+    ]);
+    const reserved = await pool.query<{ reserved: string }>(
+      'SELECT reserved_quantity::text reserved FROM inventory_balances WHERE material_id=$1',
+      [materialId],
+    );
+    expect(reserved.rows[0]!.reserved).toBe('5.000000');
+    const active = await pool.query<{ count: number }>(
+      `SELECT count(*)::int count FROM inventory_reservations WHERE order_id=ANY($1::uuid[]) AND status='ACTIVE'`,
+      [[first, second]],
+    );
+    expect(active.rows[0]!.count).toBe(2);
+    await Promise.all([
+      fulfillment.cancelOrder(
+        actor(),
+        first,
+        'Encerrar concorrência A.',
+        'cancel-stock-a',
+        randomUUID(),
+      ),
+      fulfillment.cancelOrder(
+        actor(),
+        second,
+        'Encerrar concorrência B.',
+        'cancel-stock-b',
+        randomUUID(),
+      ),
+    ]);
+
+    const raced = await pendingOrder('cancel-reserve');
+    await Promise.allSettled([
+      fulfillment.evaluateReadiness(
+        actor(),
+        raced,
+        { confirmStockException: true, stockExceptionReason: 'Reserva concorrente.' },
+        'reserve-race',
+        randomUUID(),
+      ),
+      fulfillment.cancelOrder(
+        actor(),
+        raced,
+        'Cancelamento concorrente.',
+        'cancel-race',
+        randomUUID(),
+      ),
+    ]);
+    expect((await fulfillment.getOrder(raced)).status).toBe('CANCELLED');
+    const remaining = await pool.query<{ count: number }>(
+      `SELECT count(*)::int count FROM inventory_reservations WHERE order_id=$1 AND status='ACTIVE'`,
+      [raced],
+    );
+    expect(remaining.rows[0]!.count).toBe(0);
+  });
+
+  it('repete transação PostgreSQL após conflito real 40001 e conserva o estado final', async () => {
+    await pool.query('DROP TABLE IF EXISTS sprint003_retry_probe');
+    await pool.query(
+      'CREATE UNLOGGED TABLE sprint003_retry_probe(id integer PRIMARY KEY,value integer NOT NULL)',
+    );
+    await pool.query('INSERT INTO sprint003_retry_probe VALUES(1,0)');
+    let arrivals = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const attempts = [0, 0];
+    const increment = (index: number) =>
+      transaction(async (client) => {
+        attempts[index] = (attempts[index] ?? 0) + 1;
+        const current = await client.query<{ value: number }>(
+          'SELECT value FROM sprint003_retry_probe WHERE id=1',
+        );
+        if (attempts[index] === 1) {
+          arrivals += 1;
+          if (arrivals === 2) release();
+          await barrier;
+        }
+        await client.query('UPDATE sprint003_retry_probe SET value=$1 WHERE id=1', [
+          current.rows[0]!.value + 1,
+        ]);
+      }, 'SERIALIZABLE');
+    await Promise.all([increment(0), increment(1)]);
+    expect(
+      (await pool.query<{ value: number }>('SELECT value FROM sprint003_retry_probe WHERE id=1'))
+        .rows[0]!.value,
+    ).toBe(2);
+    expect(attempts.some((value) => value > 1)).toBe(true);
+    await pool.query('DROP TABLE sprint003_retry_probe');
+  });
+
+  it('bloqueia desconexão durante criação/reconciliação e remove segredos somente após estado seguro', async () => {
+    const impact = await fulfillment.getAsaasDisconnectImpact();
+    expect(
+      impact.pendingJobs + impact.creatingCharges + impact.unreconciledCharges,
+    ).toBeGreaterThan(0);
+    await expect(
+      fulfillment.disconnectAsaas(actor(), 'disconnect-blocked', randomUUID()),
+    ).rejects.toMatchObject({ code: 'ASAAS_DISCONNECT_BLOCKED' });
+    while (await fulfillment.processOneOutbox('disconnect-drain')) {
+      // drena jobs antes de encerrar a integração
+    }
+    await pool.query(
+      `UPDATE payment_charges SET status='CANCELLED' WHERE status IN ('PENDING_CREATION','CREATED','CONFIRMED','OVERDUE')`,
+    );
+    const historyBefore = (
+      await pool.query<{ count: number }>('SELECT count(*)::int count FROM payment_charges')
+    ).rows[0]!.count;
+    const disconnected = await fulfillment.disconnectAsaas(
+      actor(),
+      'disconnect-safe',
+      randomUUID(),
+    );
+    expect(disconnected).toMatchObject({ status: 'DISCONNECTED', environment: 'SANDBOX' });
+    const stored = await pool.query<{ apiKey: Buffer | null; webhook: Buffer | null }>(
+      `SELECT api_key_ciphertext AS "apiKey",webhook_token_ciphertext AS webhook FROM asaas_connections WHERE status='DISCONNECTED' ORDER BY updated_at DESC LIMIT 1`,
+    );
+    expect(stored.rows[0]).toEqual({ apiKey: null, webhook: null });
+    expect(
+      (await pool.query<{ count: number }>('SELECT count(*)::int count FROM payment_charges'))
+        .rows[0]!.count,
+    ).toBe(historyBefore);
   });
 });
