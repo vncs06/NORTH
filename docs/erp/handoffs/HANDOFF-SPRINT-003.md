@@ -12,8 +12,8 @@ Nenhuma evidência externa foi fabricada e o Sprint 004 não foi iniciado.
 O fluxo orçamento -> pedido -> sinal -> arte -> Webhook -> reserva ->
 `READY_FOR_PRODUCTION` continua executável. Foram aprovados 33 testes unitários, 9
 testes de segurança do banco, 23 testes de integração PostgreSQL e 3 fluxos E2E. A
-migração corretiva, o backup/restauração e o build passaram. O commit de entrega é o
-commit que contém este handoff; o hash é registrado no fechamento/publicação.
+migração corretiva, o backup/restauração e o build passaram. O commit corretivo é
+`97a3962` (`fix: complete sprint 003 Asaas correction`).
 
 ## 2. Alterações
 
