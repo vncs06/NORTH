@@ -16,7 +16,8 @@ classificação formal é **PENDENTE DE IMPLANTAÇÃO POR EMPRESA**.
 - branch: `sprint-003-r2-asaas-self-service`;
 - baseline: `ebcdfb58813deff60a775566c57d828aa79002d6`;
 - commit técnico: `139209edff87092fa4886bb5bed384285c870216`;
-- upstream: será confirmado após a publicação desta branch;
+- commit do handoff auditado: `a29fe410925a82e8cdc9934c513390047c00fb05`;
+- upstream: `origin/sprint-003-r2-asaas-self-service`, confirmado na publicação;
 - `main` local e remoto permaneceram em `013bc8d92733796c0e43a296eee207f878d09254`;
 - o submódulo `3E` continua com a modificação local preexistente e não foi alterado,
   formatado, stageado ou publicado.
@@ -116,6 +117,7 @@ O banco principal foi consultado apenas em leitura e retornou
 | consulta somente leitura em `north` | 0 | banco principal preservado no Sprint 001 |
 | varredura por chaves Asaas, private keys, dumps e nomes de credenciais | 0 | nenhum achado |
 | `git diff --check` | 0 | sem erro de whitespace após correção da migração |
+| `git push -u origin sprint-003-r2-asaas-self-service` | 0 | branch nova publicada sem merge ou force push |
 
 Ocorrências completas relevantes encontradas e tratadas:
 
@@ -179,7 +181,7 @@ a operação foi repetida com permissão adequada somente nesses dois arquivos.
 | 33 | documentação de implantação criada | PASSOU | `docs/erp/deployment/asaas-onboarding.md` |
 | 34 | homologação real classificada por instalação | PASSOU | `PENDENTE DE IMPLANTAÇÃO POR EMPRESA` |
 | 35 | gates completos aprovados | PASSOU | todos os comandos obrigatórios retornaram 0 |
-| 36 | branch publicada sem merge/force push | PASSOU | publicação registrada no próximo commit/handoff; `main` intacta |
+| 36 | branch publicada sem merge/force push | PASSOU | upstream confirmado; `main` intacta |
 
 ## 6. Decisões e desvios
 
