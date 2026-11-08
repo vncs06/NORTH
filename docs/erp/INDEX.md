@@ -50,19 +50,18 @@ histórico.
 ## Estado atual
 
 - Discovery funcional: fechado para o escopo acordado.
-- Regras confirmadas: 92.
+- Regras confirmadas: 104.
 - Perguntas documentadas: 70.
 - Pendência jurídica: Q-052, política definitiva de retenção/eliminação.
 - Arquitetura-base: definida em ADR-015 e ADR-016.
 - Implementação: M1 concluído no commit `013bc8d`; Sprint 001 formalmente aceito
   em 2026-11-05. O Sprint 002 foi concluído e auditado na branch versionada pelo
   commit `b3aa5b5` (implementação em `d504940`).
-- Sprint 003/M2B: revisão corretiva local executada na branch
-  `sprint-003-r1-asaas-completion`. Sinal fixo, taxas, política de taxa, ciclo da
-  conexão, cartão hospedado, documentos, arte, stub e concorrência foram completados
-  e demonstrados localmente. O estado formal permanece `PARCIAL` exclusivamente
-  porque a homologação real depende de credenciais Sandbox e endpoint HTTPS público
-  fornecidos fora do repositório.
+- Sprint 003/M2B: concluído no código-base após a revisão R2 de onboarding autônomo.
+  Cada instalação inicia sem Asaas, o gestor conecta a conta da própria empresa e o
+  fluxo local é demonstrado com contrato oficial, stub estrito, PostgreSQL e E2E. A
+  homologação externa é `PENDENTE DE IMPLANTAÇÃO POR EMPRESA` e não bloqueia o
+  incremento; nenhuma conta real foi homologada nesta revisão.
 
 ## Regra de atualização
 

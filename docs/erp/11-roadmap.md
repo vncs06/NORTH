@@ -12,7 +12,7 @@ financeiro e atendimento inteligente.
 | ----- | ----------- | --------------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------- |
 | M1    | CONCLUÍDO   | Login -> material -> movimento -> saldo -> auditoria                  | ADR-015/016; PostgreSQL          | Razão imutável, idempotência, papéis e concorrência testados    |
 | M2A   | CONCLUÍDO   | Produto/ficha -> cliente -> orçamento versionado                      | M1                               | Cálculo explicável, snapshot imutável e nenhuma reserva         |
-| M2B   | PARCIAL     | Orçamento -> pedido -> arte+sinal -> reserva                          | M2A; Asaas Sandbox               | Correção local aprovada; homologação real Sandbox pendente      |
+| M2B   | CONCLUÍDO   | Orçamento -> pedido -> arte+sinal -> reserva                          | M2A; onboarding Asaas autônomo   | Fluxo local completo; homologação externa por implantação       |
 | M3    | PLANEJADO   | Pedido -> consumo real -> produção -> qualidade/refação               | M2B                              | Movimentos rastreáveis e sem consumo duplo                      |
 | M4    | PLANEJADO   | Qualidade -> saldo final -> entrega -> financeiro progressivo         | M3                               | Webhook conciliado, contas manuais e resultado por pedido       |
 | M5    | PLANEJADO   | Meta -> IA/humano -> demanda/pedido integrado                         | M2-M4; onboarding Meta, IA e n8n | Webhook idempotente, orçamento de IA e transferência humana     |
@@ -20,9 +20,9 @@ financeiro e atendimento inteligente.
 O escopo histórico de M2 foi dividido em M2A e M2B para reduzir risco transacional.
 M2A corresponde ao Sprint 002 concluído e calcula apenas demanda prevista. M2B
 corresponde ao Sprint 003: conversão explícita em pedido, arte versionada, sinal,
-webhook e reserva, sem iniciar consumo ou produção. A revisão corretiva R1 completou
-a superfície local prevista e os cenários concorrentes; M2B permanece parcial até a
-homologação no Sandbox real com credenciais e URL HTTPS injetadas com segurança.
+webhook e reserva, sem iniciar consumo ou produção. A revisão R2 concluiu o onboarding
+autônomo da conta de cada empresa, contrato estrito e bloqueio seguro sem conexão.
+Homologação real permanece `PENDENTE DE IMPLANTAÇÃO POR EMPRESA`, sem bloquear M2B.
 
 ## Riscos e decisões bloqueantes
 

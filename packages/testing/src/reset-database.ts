@@ -9,7 +9,7 @@ try {
   await verifyConnectedTestDatabase(pool, policy);
   await pool.query(`TRUNCATE inventory_reservation_alerts,inventory_reservations,artwork_approvals,
     artwork_versions,object_files,asaas_webhook_inbox,integration_outbox,payment_charges,
-    asaas_customer_bindings,asaas_connections,financial_decisions,order_state_history,
+    asaas_customer_bindings,asaas_payment_methods,asaas_connections,financial_decisions,order_state_history,
     order_material_requirements,order_items,orders,deposit_policies,
     quote_pricing_component_snapshots,quote_material_snapshots,quote_items,
     quotes,pricing_components,discount_policy_options,discount_policies,pricing_policies,technical_sheet_components,

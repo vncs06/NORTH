@@ -29,6 +29,19 @@ function publicHeaders(headers: http.IncomingHttpHeaders): Record<string, string
   );
 }
 
+function publicBody(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      /token|key|cpf|cnpj|document/i.test(key) ? '[REDACTED]' : item,
+    ]),
+  );
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://127.0.0.1:${port}`);
   const rawBody = await buffer(request);
@@ -62,7 +75,7 @@ const server = http.createServer(async (request, response) => {
     method: request.method ?? 'GET',
     path: `${url.pathname}${url.search}`,
     headers: publicHeaders(request.headers),
-    body,
+    body: publicBody(body),
   });
   const selected = String(
     request.headers['x-stub-scenario'] ?? url.searchParams.get('scenario') ?? scenario,
@@ -70,12 +83,18 @@ const server = http.createServer(async (request, response) => {
   if (!request.headers['user-agent'])
     return reply(response, 400, { errors: [{ description: 'user-agent required' }] });
   const token = request.headers.access_token;
-  if (token === 'stub-production-key-000000000000')
+  const requestedEnvironment = String(request.headers['x-north-asaas-environment'] ?? 'SANDBOX');
+  if (
+    (token === 'stub-production-key-000000000000' && requestedEnvironment !== 'PRODUCTION') ||
+    (String(token).startsWith('stub-sandbox') && requestedEnvironment !== 'SANDBOX')
+  )
     return reply(response, 401, { errors: [{ description: 'environment mismatch' }] });
   if (
-    !['stub-sandbox-api-key-000000000000', 'stub-rotated-api-key-000000000000'].includes(
-      String(token),
-    )
+    ![
+      'stub-sandbox-api-key-000000000000',
+      'stub-rotated-api-key-000000000000',
+      'stub-production-key-000000000000',
+    ].includes(String(token))
   ) {
     return reply(response, 401, { errors: [{ description: 'invalid access token' }] });
   }
@@ -100,12 +119,79 @@ const server = http.createServer(async (request, response) => {
     });
   }
 
+  if (request.method === 'GET' && url.pathname === '/v3/webhooks') {
+    return reply(response, 200, { data: [...webhooks.values()] });
+  }
+
   if (request.method === 'POST' && url.pathname === '/v3/webhooks') {
+    const required = [
+      'name',
+      'url',
+      'email',
+      'enabled',
+      'interrupted',
+      'apiVersion',
+      'authToken',
+      'sendType',
+      'events',
+    ];
+    const missing = required.filter((field) => body[field] === undefined);
+    const authToken = stringValue(body.authToken);
+    const events = Array.isArray(body.events) ? body.events : [];
+    let webhookUrl: URL | null = null;
+    try {
+      webhookUrl = new URL(stringValue(body.url));
+    } catch {
+      webhookUrl = null;
+    }
+    if (
+      missing.length ||
+      typeof body.enabled !== 'boolean' ||
+      typeof body.interrupted !== 'boolean' ||
+      body.apiVersion !== 3 ||
+      body.sendType !== 'SEQUENTIALLY' ||
+      !/^\S{32,255}$/.test(authToken) ||
+      authToken === token ||
+      events.length === 0 ||
+      !webhookUrl ||
+      webhookUrl.protocol !== 'https:' ||
+      !String(body.email).includes('@')
+    ) {
+      return reply(response, 400, {
+        errors: [{ description: `invalid webhook contract; missing=${missing.join(',')}` }],
+      });
+    }
+    const duplicate = [...webhooks.values()].find(
+      (item) => item.name === body.name && item.url === body.url,
+    );
+    if (duplicate) return reply(response, 200, duplicate);
     const id = `wh_${randomUUID().replaceAll('-', '')}`;
     webhooks.set(id, { id, ...body });
+    if (selected === 'timeout-after-webhook') return void request.socket.destroy();
     return reply(response, 200, { id });
   }
   const webhookId = /^\/v3\/webhooks\/([^/]+)$/.exec(url.pathname)?.[1];
+  if (request.method === 'PUT' && webhookId) {
+    const existing = webhooks.get(webhookId);
+    const authToken = stringValue(body.authToken);
+    if (
+      !existing ||
+      !body.email ||
+      body.enabled !== true ||
+      body.interrupted !== false ||
+      body.apiVersion !== 3 ||
+      body.sendType !== 'SEQUENTIALLY' ||
+      !Array.isArray(body.events) ||
+      body.events.length === 0 ||
+      !/^\S{32,255}$/.test(authToken) ||
+      authToken === token
+    ) {
+      return reply(response, 400, { errors: [{ description: 'invalid webhook update' }] });
+    }
+    const updated = { ...existing, ...body, id: webhookId };
+    webhooks.set(webhookId, updated);
+    return reply(response, 200, updated);
+  }
   if (request.method === 'DELETE' && webhookId) {
     if (!webhooks.delete(webhookId)) return reply(response, 404, { error: 'webhook not found' });
     return reply(response, 200, { deleted: true });
@@ -127,6 +213,9 @@ const server = http.createServer(async (request, response) => {
       : reply(response, 404, { error: 'customer not found' });
   }
   if (request.method === 'POST' && url.pathname === '/v3/customers') {
+    if (!body.name || !/^\d{11}(?:\d{3})?$/.test(stringValue(body.cpfCnpj))) {
+      return reply(response, 400, { errors: [{ description: 'name and cpfCnpj required' }] });
+    }
     const duplicate = [...customers.values()].find(
       (item) => item.externalReference === body.externalReference,
     );

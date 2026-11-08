@@ -26,6 +26,12 @@ Nenhuma permissão depende apenas da interface. Cada comando e consulta verifica
 usuário, empresa da instalação, vínculo, papel/escopo, estado do recurso e autorização
 da operação.
 
+Somente o Gestor salva, valida, rotaciona ou desconecta a integração Asaas e habilita
+meios de pagamento. Funcionário pode consultar apenas o estado operacional seguro.
+API Key, token e e-mail completo são cifrados; GET, auditoria e logs retornam somente
+estado, datas e valores mascarados. O Administrador NORTH permanece somente leitura e
+não recebe esses segredos.
+
 ## Dados pessoais e retenção
 
 Mensagens, mídias, artes e memória permanecem durante o vínculo ativo da empresa com

@@ -25,9 +25,14 @@ interface Fees {
 }
 interface AsaasConfig {
   status: string;
-  environment: string;
+  environment: 'SANDBOX' | 'PRODUCTION';
   webhookPublicUrl?: string;
   keyFingerprint?: string;
+  notificationEmailMasked?: string;
+  webhookStatus?: string;
+  lastValidatedAt?: string;
+  lastEventReceivedAt?: string;
+  paymentMethods?: Array<{ billingType: string; enabled: boolean }>;
 }
 
 export default function OrderSettingsPage() {
@@ -35,6 +40,8 @@ export default function OrderSettingsPage() {
   const [asaas, setAsaas] = useState<AsaasConfig | null>(null);
   const [fees, setFees] = useState<Fees | null>(null);
   const [depositMode, setDepositMode] = useState<'PERCENTAGE' | 'FIXED_AMOUNT'>('PERCENTAGE');
+  const [asaasEnvironment, setAsaasEnvironment] = useState<'SANDBOX' | 'PRODUCTION'>('SANDBOX');
+  const [webhookToken, setWebhookToken] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -134,6 +141,22 @@ export default function OrderSettingsPage() {
     }
   }
 
+  async function rotateWebhookToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      await api('/integrations/asaas/rotate-webhook-token', {
+        method: 'POST',
+        headers: { 'idempotency-key': idempotencyKey() },
+        body: JSON.stringify({ webhookAuthToken: webhookToken }),
+      });
+      setWebhookToken('');
+      setSuccess('Novo token validado no Webhook e armazenado de forma protegida.');
+      await load();
+    } catch (caught) {
+      setError(message(caught));
+    }
+  }
+
   async function disconnect() {
     if (
       !window.confirm(
@@ -165,18 +188,55 @@ export default function OrderSettingsPage() {
         method: 'PUT',
         headers: { 'idempotency-key': idempotencyKey() },
         body: JSON.stringify({
-          environment: 'SANDBOX',
+          environment: asaasEnvironment,
           apiKey: form.get('apiKey'),
-          webhookAuthToken: form.get('webhookAuthToken'),
-          webhookPublicUrl: form.get('webhookPublicUrl'),
+          notificationEmail: form.get('notificationEmail'),
+          webhookAuthToken: webhookToken,
         }),
       });
       formElement.reset();
-      setSuccess('Conexão Sandbox armazenada de forma cifrada.');
+      setWebhookToken('');
+      setSuccess('Conexão validada, taxas consultadas e Webhook reconciliado.');
       await load();
     } catch (caught) {
       setError(message(caught));
     }
+  }
+
+  async function generateToken() {
+    try {
+      const result = await api<{ token: string }>('/integrations/asaas/webhook-token/generate', {
+        method: 'POST',
+        body: '{}',
+      });
+      setWebhookToken(result.token);
+      setSuccess('Token seguro gerado por sua ação. Ele será exibido somente neste formulário.');
+    } catch (caught) {
+      setError(message(caught));
+    }
+  }
+
+  async function savePaymentMethods(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const methods = ['PIX', 'BOLETO', 'CREDIT_CARD'].filter((item) => form.has(item));
+    try {
+      await api('/integrations/asaas/payment-methods', {
+        method: 'PUT',
+        headers: { 'idempotency-key': idempotencyKey() },
+        body: JSON.stringify({ methods }),
+      });
+      setSuccess('Meios de pagamento atualizados. Nenhuma cobrança antiga foi enviada.');
+      await load();
+    } catch (caught) {
+      setError(message(caught));
+    }
+  }
+
+  async function copyWebhookUrl() {
+    if (!asaas?.webhookPublicUrl) return;
+    await navigator.clipboard.writeText(asaas.webhookPublicUrl);
+    setSuccess('URL pública do Webhook copiada.');
   }
 
   return (
@@ -240,48 +300,119 @@ export default function OrderSettingsPage() {
           <button>Ativar nova versão</button>
         </form>
       </section>
-      <section className="panel">
-        <h2>Asaas Sandbox</h2>
+      <section className="panel" aria-labelledby="asaas-title">
+        <h2 id="asaas-title">Configurações → Pagamentos → Asaas</h2>
+        <h3>1. Antes de conectar</h3>
+        <p>
+          A conta, as tarifas e todo o dinheiro pertencem à sua empresa. O NORTH não recebe nem
+          centraliza valores. Crie a API Key na conta Asaas da empresa em{' '}
+          <strong>Menu do usuário → Integrações → Chaves de API</strong>. O Asaas mostra a chave
+          apenas uma vez; o NORTH a armazenará cifrada e nunca a mostrará novamente.
+        </p>
         <p className="muted">
-          A API key e o token do webhook nunca são devolvidos pela API. Produção permanece
-          desabilitada.
+          O Webhook comunica pagamentos, atrasos, estornos e chargebacks. Sem conexão ativa, o
+          restante do ERP continua disponível e cobranças automáticas ficam desabilitadas.
         </p>
         {asaas && (
           <div className="notice">
             Estado: {asaas.status} · ambiente {asaas.environment}
-            {asaas.keyFingerprint ? ` · chave …${asaas.keyFingerprint}` : ''}
+            {asaas.keyFingerprint ? ` · chave configurada (${asaas.keyFingerprint})` : ''}
+            {asaas.notificationEmailMasked ? ` · alertas ${asaas.notificationEmailMasked}` : ''}
           </div>
         )}
-        <form className="grid" onSubmit={saveAsaas}>
-          <label>
-            API key Sandbox
-            <input name="apiKey" type="password" autoComplete="off" minLength={20} required />
-          </label>
-          <label>
-            Token do webhook
-            <input
-              name="webhookAuthToken"
-              type="password"
-              autoComplete="off"
-              minLength={32}
-              maxLength={255}
-              required
-            />
-          </label>
-          <label className="full">
-            URL pública HTTPS do webhook
-            <input
-              name="webhookPublicUrl"
-              type="url"
-              placeholder="https://…/api/v1/webhooks/asaas/payments"
-              required
-            />
-          </label>
-          <button>Salvar conexão cifrada</button>
-        </form>
-        {asaas?.status === 'CONNECTED' && (
+        {asaas?.status !== 'ACTIVE' && (
+          <form className="grid" onSubmit={saveAsaas} autoComplete="off">
+            <h3 className="full">2. Ambiente</h3>
+            <label>
+              Ambiente Asaas
+              <select
+                value={asaasEnvironment}
+                onChange={(event) =>
+                  setAsaasEnvironment(event.target.value as typeof asaasEnvironment)
+                }
+              >
+                <option value="SANDBOX">Sandbox</option>
+                <option value="PRODUCTION">Produção</option>
+              </select>
+            </label>
+            <div className="notice full">
+              Chaves de Sandbox e Produção são diferentes. Sandbox não cria cobranças reais.
+              Produção pode movimentar cobranças reais e exige nova validação.
+            </div>
+            <h3 className="full">3. Credencial da empresa</h3>
+            <label>
+              API Key do Asaas
+              <input
+                name="apiKey"
+                type="password"
+                autoComplete="new-password"
+                minLength={20}
+                required
+              />
+            </label>
+            <h3 className="full">4. Webhook</h3>
+            <label>
+              E-mail para alertas da integração
+              <input
+                name="notificationEmail"
+                type="email"
+                autoComplete="off"
+                maxLength={320}
+                required
+              />
+            </label>
+            <label>
+              Token de autenticação do Webhook
+              <input
+                name="webhookAuthToken"
+                type="password"
+                autoComplete="new-password"
+                minLength={32}
+                maxLength={255}
+                value={webhookToken}
+                onChange={(event) => setWebhookToken(event.target.value)}
+                required
+              />
+            </label>
+            <button type="button" className="secondary" onClick={() => void generateToken()}>
+              Gerar token seguro
+            </button>
+            <label className="full">
+              URL do Webhook fornecida pelo NORTH
+              <input value={asaas?.webhookPublicUrl ?? 'Configuração técnica ausente'} readOnly />
+            </label>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void copyWebhookUrl()}
+              disabled={!asaas?.webhookPublicUrl}
+            >
+              Copiar URL
+            </button>
+            <p className="muted full">
+              Eventos de pagamento · API v3 · envio sequencial. O e-mail recebe alertas; não é
+              login.
+            </p>
+            <h3 className="full">5. Validar e conectar</h3>
+            <button disabled={!asaas?.webhookPublicUrl}>Validar e conectar</button>
+          </form>
+        )}
+        {asaas?.status === 'ACTIVE' && (
           <>
             <hr />
+            <h3>6. Conexão ativa</h3>
+            <p className="muted">
+              Webhook: {asaas.webhookStatus ?? 'ACTIVE'} · URL {asaas.webhookPublicUrl} · última
+              validação{' '}
+              {asaas.lastValidatedAt
+                ? new Date(asaas.lastValidatedAt).toLocaleString('pt-BR')
+                : '—'}{' '}
+              · último evento{' '}
+              {asaas.lastEventReceivedAt
+                ? new Date(asaas.lastEventReceivedAt).toLocaleString('pt-BR')
+                : 'ainda não recebido'}
+              .
+            </p>
             <h3>Taxas da conta</h3>
             <p className="muted">
               Estado: {fees?.status ?? 'NOT_FETCHED'}
@@ -313,6 +444,22 @@ export default function OrderSettingsPage() {
                 </tbody>
               </table>
             </div>
+            <h3>Meios habilitados</h3>
+            <form className="grid" onSubmit={savePaymentMethods}>
+              {['PIX', 'BOLETO', 'CREDIT_CARD'].map((method) => (
+                <label key={method}>
+                  <input
+                    name={method}
+                    type="checkbox"
+                    defaultChecked={asaas.paymentMethods?.some(
+                      (item) => item.billingType === method && item.enabled,
+                    )}
+                  />{' '}
+                  {method}
+                </label>
+              ))}
+              <button>Salvar meios habilitados</button>
+            </form>
             <h3>Absorção ou repasse</h3>
             <form className="grid" onSubmit={saveFeePolicy}>
               {['PIX', 'BOLETO', 'CREDIT_CARD'].map((method) => (
@@ -330,10 +477,35 @@ export default function OrderSettingsPage() {
             <form className="grid" onSubmit={rotateKey}>
               <label>
                 Nova API key
-                <input name="apiKey" type="password" minLength={20} autoComplete="off" required />
+                <input
+                  name="apiKey"
+                  type="password"
+                  minLength={20}
+                  autoComplete="new-password"
+                  required
+                />
               </label>
               <button>Validar e rotacionar</button>
             </form>
+            <form className="grid" onSubmit={rotateWebhookToken}>
+              <label>
+                Novo token do Webhook
+                <input
+                  type="password"
+                  minLength={32}
+                  maxLength={255}
+                  autoComplete="new-password"
+                  value={webhookToken}
+                  onChange={(event) => setWebhookToken(event.target.value)}
+                  required
+                />
+              </label>
+              <button type="button" className="secondary" onClick={() => void generateToken()}>
+                Gerar novo token seguro
+              </button>
+              <button>Rotacionar token</button>
+            </form>
+            <p className="muted">A falha de rotação preserva a chave atualmente ativa.</p>
             <button type="button" className="secondary" onClick={() => void disconnect()}>
               Analisar impacto e desconectar
             </button>

@@ -19,6 +19,62 @@ export type DepositPolicy =
   | { mode: 'FIXED_AMOUNT'; rateBps?: null; fixedAmountCents: number };
 
 export type FeeStrategy = 'ABSORB' | 'PASS_THROUGH';
+export type AsaasConnectionStatus =
+  | 'NOT_CONFIGURED'
+  | 'CONFIGURING'
+  | 'VALIDATING'
+  | 'ACTIVE'
+  | 'DEGRADED'
+  | 'DISCONNECTING'
+  | 'DISCONNECTED';
+
+export function assertAsaasConnectionTransition(
+  from: AsaasConnectionStatus,
+  to: AsaasConnectionStatus,
+): void {
+  const allowed: Record<AsaasConnectionStatus, AsaasConnectionStatus[]> = {
+    NOT_CONFIGURED: ['CONFIGURING'],
+    CONFIGURING: ['VALIDATING', 'DISCONNECTED'],
+    VALIDATING: ['ACTIVE', 'CONFIGURING', 'DEGRADED'],
+    ACTIVE: ['VALIDATING', 'DEGRADED', 'DISCONNECTING'],
+    DEGRADED: ['VALIDATING', 'DISCONNECTING'],
+    DISCONNECTING: ['DISCONNECTED', 'DEGRADED'],
+    DISCONNECTED: ['CONFIGURING'],
+  };
+  if (!allowed[from].includes(to)) {
+    throw new DomainError(
+      'INVALID_ASAAS_CONNECTION_TRANSITION',
+      `Transição da integração Asaas inválida: ${from} -> ${to}.`,
+      409,
+    );
+  }
+}
+
+export function assertAsaasApiKeyEnvironment(
+  apiKey: string,
+  environment: 'SANDBOX' | 'PRODUCTION',
+): void {
+  const recognized = apiKey.startsWith('$aact_hmlg_')
+    ? 'SANDBOX'
+    : apiKey.startsWith('$aact_prod_')
+      ? 'PRODUCTION'
+      : null;
+  if (recognized && recognized !== environment) {
+    throw new DomainError(
+      'ASAAS_ENVIRONMENT_MISMATCH',
+      'A API Key não pertence ao ambiente selecionado.',
+      422,
+    );
+  }
+}
+
+export function maskIntegrationEmail(value: string): string {
+  const [local, domain] = value.trim().toLowerCase().split('@');
+  if (!local || !domain) {
+    throw new DomainError('INVALID_INTEGRATION_EMAIL', 'E-mail de alertas inválido.', 422);
+  }
+  return `${local.slice(0, 1)}${'*'.repeat(Math.max(3, Math.min(8, local.length - 1)))}@${domain}`;
+}
 
 export function calculateDepositCents(input: {
   totalCents: number;

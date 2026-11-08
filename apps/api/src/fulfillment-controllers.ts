@@ -25,10 +25,12 @@ import {
   feePolicySchema,
   financialExceptionSchema,
   putDepositPolicySchema,
+  putAsaasPaymentMethodsSchema,
   receiveWebhookSchema,
   rejectArtworkSchema,
   resourceIdSchema,
   rotateAsaasKeySchema,
+  rotateAsaasWebhookTokenSchema,
   updateBillingDocumentSchema,
   uploadArtworkSchema,
 } from '@north/contracts';
@@ -99,7 +101,7 @@ export class AsaasConfigurationController {
 
   @Get()
   async get(@Req() request: AuthenticatedRequest) {
-    await this.authorization.require(request, { roles: ['MANAGER'] });
+    await this.authorization.require(request);
     return this.fulfillment.getAsaasConfiguration();
   }
 
@@ -113,6 +115,27 @@ export class AsaasConfigurationController {
     return this.fulfillment.configureAsaas(
       actor,
       configureAsaasSchema.parse(body),
+      key,
+      request.correlationId,
+    );
+  }
+
+  @Post('webhook-token/generate')
+  async generateWebhookToken(@Req() request: AuthenticatedRequest) {
+    await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.generateAsaasWebhookToken();
+  }
+
+  @Put('payment-methods')
+  async putPaymentMethods(
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.putAsaasPaymentMethods(
+      actor,
+      putAsaasPaymentMethodsSchema.parse(body).methods,
       key,
       request.correlationId,
     );
@@ -161,6 +184,21 @@ export class AsaasConfigurationController {
     return this.fulfillment.rotateAsaasKey(
       actor,
       rotateAsaasKeySchema.parse(body).apiKey,
+      key,
+      request.correlationId,
+    );
+  }
+
+  @Post('rotate-webhook-token')
+  async rotateWebhookToken(
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const actor = await this.authorization.require(request, { roles: ['MANAGER'], mutation: true });
+    return this.fulfillment.rotateAsaasWebhookToken(
+      actor,
+      rotateAsaasWebhookTokenSchema.parse(body).webhookAuthToken,
       key,
       request.correlationId,
     );

@@ -25,11 +25,18 @@ e fila de reprocessamento sem duplicar pedido ou pagamento.
 
 ### Conexão da empresa
 
+- Cada instalação começa em `NOT_CONFIGURED`; nenhuma credencial global do NORTH é
+  usada. Ausência da integração não impede catálogo, orçamento, pedido, arte ou estoque.
 - Gestor cria uma API Key na própria conta Asaas e informa uma vez ao NORTH.
-- Backend valida ambiente e credencial, consulta dados/taxas e configura o Webhook.
+- Assistente solicita ambiente, e-mail de alertas e token de Webhook informado ou
+  gerado por ação explícita. A URL vem de `NORTH_PUBLIC_BASE_URL`, nunca do header Host.
+- Backend valida ambiente e credencial, consulta taxas e cria ou reconcilia o Webhook
+  completo com envio `SEQUENTIALLY`; somente então a conexão fica `ACTIVE`.
 - Credencial fica criptografada em cofre de segredos, nunca em frontend ou logs;
   depois do cadastro, o painel mostra apenas identificação mascarada e status.
 - Sandbox e Produção são conexões diferentes e não compartilham chave ou dados.
+- Sem estado `ACTIVE` e meio explicitamente habilitado, nenhuma cobrança externa ou
+  outbox de criação é gerada. Ativação não envia pendências antigas automaticamente.
 
 O Asaas é a única integração financeira externa. Contas bancárias ou caixas externos
 podem existir como contas manuais no NORTH, mas não terão sincronização bancária.
@@ -51,7 +58,7 @@ podem existir como contas manuais no NORTH, mas não terão sincronização banc
 - Webhooks são `at least once`; deduplicar pelo `id` do evento e reconciliar falhas.
 - Configurar `authToken` próprio do Webhook, diferente da API Key da conta.
 
-Fontes oficiais Asaas consultadas em 2026-10-30:
+Fontes oficiais Asaas consultadas novamente em 2026-11-08:
 
 - https://docs.asaas.com/docs/autentica%C3%A7%C3%A3o-1
 - https://docs.asaas.com/docs/chaves-de-api
@@ -60,6 +67,9 @@ Fontes oficiais Asaas consultadas em 2026-10-30:
 - https://docs.asaas.com/docs/criando-um-cliente
 - https://docs.asaas.com/docs/cobrancas-via-cartao-de-credito
 - https://www.asaas.com/precos-e-taxas
+
+A homologação real é `PENDENTE DE IMPLANTAÇÃO POR EMPRESA`; o código-base é validado
+sem credenciais externas usando contrato oficial, stub estrito e banco de testes.
 
 ## Divisão de responsabilidades — proposta
 

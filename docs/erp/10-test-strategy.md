@@ -23,6 +23,9 @@
 - webhooks repetidos produzem uma transição;
 - worker pode falhar após efeito externo e retomar com reconciliação;
 - timeout de integração não confirma operação sem evidência;
+- timeout após criação possível de Webhook reconcilia por nome e URL antes de repetir;
+- onboarding Asaas usa stub estrito, recusa contrato incompleto, valida ausência de
+  segredo e demonstra concorrência/idempotência no PostgreSQL;
 - migração interrompida tem procedimento de recuperação.
 
 ## Segurança
@@ -41,6 +44,7 @@
 - migração desde banco vazio;
 - verificação de dependências e segredos;
 - E2E do fluxo alterado quando aplicável.
+- homologação Asaas real é checklist por instalação, não gate global do código-base.
 
 ## Evidências
 

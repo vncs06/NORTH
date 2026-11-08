@@ -42,4 +42,5 @@ await runManagedProcess('npm', ['run', 'dev', '--workspace=@north/api'], {
   OBJECT_STORAGE_ROOT:
     process.env.OBJECT_STORAGE_ROOT ?? `${process.cwd()}/test-results/private-objects`,
   ASAAS_BASE_URL: process.env.ASAAS_BASE_URL ?? 'http://127.0.0.1:3199/v3',
+  NORTH_PUBLIC_BASE_URL: process.env.NORTH_PUBLIC_BASE_URL ?? 'https://north.example.test',
 });

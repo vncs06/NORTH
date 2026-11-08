@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertArtworkTransition,
+  assertAsaasApiKeyEnvironment,
+  assertAsaasConnectionTransition,
   assertHostedInvoiceUrl,
   assertOrderTransition,
   calculateDepositCents,
@@ -8,6 +10,7 @@ import {
   evaluateOrderReadiness,
   paymentEventStatus,
   normalizeAndValidateTaxDocument,
+  maskIntegrationEmail,
   sumMaterialRequirements,
 } from './fulfillment.js';
 import { sanitizeBusinessAuditData } from './index.js';
@@ -137,6 +140,23 @@ describe('fulfillment domain', () => {
     expect(() => assertArtworkTransition('DRAFT', 'AWAITING_CUSTOMER_APPROVAL')).not.toThrow();
     expect(() => assertArtworkTransition('AWAITING_CUSTOMER_APPROVAL', 'REJECTED')).not.toThrow();
     expect(() => assertArtworkTransition('DRAFT', 'APPROVED')).toThrowError(/inválida/);
+  });
+
+  it('controla o ciclo autônomo da conexão Asaas sem saltos arbitrários', () => {
+    expect(() => assertAsaasConnectionTransition('NOT_CONFIGURED', 'CONFIGURING')).not.toThrow();
+    expect(() => assertAsaasConnectionTransition('CONFIGURING', 'VALIDATING')).not.toThrow();
+    expect(() => assertAsaasConnectionTransition('VALIDATING', 'ACTIVE')).not.toThrow();
+    expect(() => assertAsaasConnectionTransition('ACTIVE', 'DISCONNECTED')).toThrowError(
+      /inválida/,
+    );
+  });
+
+  it('separa ambientes reconhecidos e mascara o e-mail operacional', () => {
+    expect(() => assertAsaasApiKeyEnvironment('$aact_hmlg_example', 'SANDBOX')).not.toThrow();
+    expect(() => assertAsaasApiKeyEnvironment('$aact_prod_example', 'SANDBOX')).toThrowError(
+      /ambiente/,
+    );
+    expect(maskIntegrationEmail('Alerts.Team@example.test')).toBe('a********@example.test');
   });
 
   it('mapeia somente eventos financeiros conhecidos', () => {

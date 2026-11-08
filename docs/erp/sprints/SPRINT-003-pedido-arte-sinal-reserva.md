@@ -2,13 +2,12 @@
 
 ## Estado
 
-`PARCIAL` após a revisão corretiva R1 na branch
-`sprint-003-r1-asaas-completion`, baseada em `3da295b`. O incremento local completo
-foi demonstrado por testes unitários, integração PostgreSQL e E2E: sinal fixo,
-consulta e política de taxas, rotação/desconexão, cartão hospedado, CPF/CNPJ, arte,
-stub e os vinte cenários concorrentes. A homologação real do Asaas Sandbox permanece
-`BLOQUEADA` somente pela ausência de credenciais e URL HTTPS pública injetadas de
-modo seguro. O Sprint 003 não é declarado concluído sem essa evidência externa.
+`CONCLUÍDO` no código-base após a revisão R2 na branch
+`sprint-003-r2-asaas-self-service`. A decisão de produto de 2026-11-08 substituiu o
+bloqueio global por onboarding autônomo: cada instalação inicia sem integração e o
+gestor conecta a conta da própria empresa. Contrato oficial, stub estrito, PostgreSQL,
+concorrência e E2E demonstram o fluxo local. Homologação real é
+`PENDENTE DE IMPLANTAÇÃO POR EMPRESA`; nenhuma conta externa foi homologada nesta revisão.
 
 ## Objetivo verificável
 
@@ -62,7 +61,8 @@ implementados.
 | Falta de saldo e exceção gerencial | integração e segundo fluxo E2E |
 | Cancelamento libera reserva | movimento `RELEASE` e integração |
 | Migração preserva Sprints 001/002 | verificador dedicado |
-| Homologação real do Sandbox | `BLOQUEADO`: faltam credencial, authToken e URL HTTPS pública |
+| Onboarding autônomo e contrato Asaas | painel gerencial, stub estrito, integração e E2E |
+| Homologação real da conta | `PENDENTE DE IMPLANTAÇÃO POR EMPRESA` |
 
 ## Revisão corretiva 003-R1
 
@@ -82,3 +82,21 @@ Documentação oficial do Asaas consultada em 2026-11-07. Não foi identificada
 alteração contratual incompatível com ADR-005: autenticação continua em
 `access_token`, taxas em `/v3/myAccount/fees/`, cobranças são assíncronas e Webhooks
 continuam exigindo idempotência do consumidor.
+
+## Revisão final 003-R2
+
+- estados explícitos `NOT_CONFIGURED`, `CONFIGURING`, `VALIDATING`, `ACTIVE`,
+  `DEGRADED`, `DISCONNECTING` e `DISCONNECTED`;
+- painel em Configurações → Pagamentos → Asaas, com orientação, ambientes, chave de
+  uso único, e-mail, token explícito e URL técnica somente leitura;
+- Webhook completo (`email`, `enabled`, `interrupted`, `apiVersion`, `sendType` e
+  eventos), reconciliação após timeout e meios desabilitados até ação gerencial;
+- ausência de conexão bloqueia somente cobrança automática, sem erro 500 ou efeito em estoque;
+- migração incremental `20261108120000_sprint_003_r2_asaas_self_service` preserva R1
+  e reclassifica conexões antigas incompletas como `CONFIGURING`;
+- `asaas:sandbox:homologate` virou lembrete opcional de implantação e não lê credencial
+  nem cria cobrança paralela ao domínio NORTH.
+
+Documentação oficial consultada novamente em 2026-11-08. A referência atual exige
+`name`, `url`, `email`, `enabled`, `interrupted`, `events` e `sendType`; o projeto
+também envia `apiVersion=3` e `authToken` de 32–255 caracteres conforme o guia oficial.

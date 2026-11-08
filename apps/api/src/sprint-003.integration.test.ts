@@ -210,6 +210,20 @@ describe('Sprint 003 com PostgreSQL real', () => {
       .set('idempotency-key', 'employee-forbidden-policy')
       .send({ mode: 'PERCENTAGE', rateBps: 5000, effectiveAt: new Date().toISOString() })
       .expect(403);
+    const integrationState = await agent.get('/api/v1/integrations/asaas').expect(200);
+    expect(integrationState.body).toMatchObject({ status: 'NOT_CONFIGURED' });
+    await agent
+      .put('/api/v1/integrations/asaas')
+      .set('origin', 'http://localhost:3000')
+      .set('x-csrf-token', csrf)
+      .set('idempotency-key', 'employee-forbidden-asaas')
+      .send({
+        environment: 'SANDBOX',
+        apiKey: 'stub-sandbox-api-key-000000000000',
+        notificationEmail: 'alerts@example.test',
+        webhookAuthToken: 'employee-must-not-configure-000000000000',
+      })
+      .expect(403);
     await agent.get('/api/v1/orders').expect(200);
   });
 
@@ -303,15 +317,40 @@ describe('Sprint 003 com PostgreSQL real', () => {
       syntheticValidCpf,
       randomUUID(),
     );
+    const invalidWebhook = await fetch('http://127.0.0.1:3199/v3/webhooks', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'user-agent': 'NORTH-contract-test',
+        access_token: 'stub-sandbox-api-key-000000000000',
+        'x-north-asaas-environment': 'SANDBOX',
+      },
+      body: JSON.stringify({ name: 'incompleto', url: 'https://north.example.test/hook' }),
+    });
+    expect(invalidWebhook.status).toBe(400);
+    process.env.ASAAS_STUB_SCENARIO = 'timeout-after-webhook';
     await fulfillment.configureAsaas(
       actor(),
       {
         environment: 'SANDBOX',
         apiKey: 'stub-sandbox-api-key-000000000000',
         webhookAuthToken: 'stub-webhook-token-000000000000000000000',
-        webhookPublicUrl: 'https://example.test/api/v1/webhooks/asaas/payments',
+        notificationEmail: 'alerts@example.test',
       },
       'asaas-s3',
+      randomUUID(),
+    );
+    delete process.env.ASAAS_STUB_SCENARIO;
+    const stubStats = (await (await fetch('http://127.0.0.1:3199/__stub/stats')).json()) as {
+      webhooks: number;
+      calls: Array<{ body: Record<string, unknown> }>;
+    };
+    expect(stubStats.webhooks).toBe(1);
+    expect(JSON.stringify(stubStats.calls)).not.toContain('stub-webhook-token');
+    await fulfillment.putAsaasPaymentMethods(
+      actor(),
+      ['PIX', 'BOLETO', 'CREDIT_CARD'],
+      'asaas-methods-s3',
       randomUUID(),
     );
     await fulfillment.putFeePolicy(
@@ -418,9 +457,9 @@ describe('Sprint 003 com PostgreSQL real', () => {
     ]);
     expect(rotations.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     expect(rotations.filter((result) => result.status === 'rejected')).toHaveLength(1);
-    expect(await fulfillment.getAsaasConfiguration()).toMatchObject({ status: 'CONNECTED' });
+    expect(await fulfillment.getAsaasConfiguration()).toMatchObject({ status: 'ACTIVE' });
     const stored = await pool.query(
-      `SELECT encode(api_key_ciphertext,'escape') ciphertext FROM asaas_connections WHERE status='CONNECTED'`,
+      `SELECT encode(api_key_ciphertext,'escape') ciphertext FROM asaas_connections WHERE status='ACTIVE'`,
     );
     expect(stored.rows[0].ciphertext).not.toContain('stub-sandbox-api-key');
     await expect(

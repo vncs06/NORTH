@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes }
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DomainError } from '@north/domain';
-import { assertHostedInvoiceUrl } from '@north/domain/fulfillment';
+import { assertAsaasApiKeyEnvironment, assertHostedInvoiceUrl } from '@north/domain/fulfillment';
 
 export interface EncryptedValue {
   ciphertext: Buffer;
@@ -62,6 +62,60 @@ export function shortFingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 12);
 }
 
+export function generateWebhookAuthToken(): string {
+  return `whsec_${randomBytes(36).toString('base64url')}`;
+}
+
+export const ASAAS_WEBHOOK_PATH = '/api/v1/webhooks/asaas/payments';
+
+export function configuredAsaasWebhookUrl(): string {
+  const configured = process.env.NORTH_PUBLIC_BASE_URL?.trim();
+  if (!configured) {
+    throw new DomainError(
+      'NORTH_PUBLIC_BASE_URL_MISSING',
+      'A URL pública confiável da instalação precisa ser configurada antes de conectar o Asaas.',
+      422,
+    );
+  }
+  let base: URL;
+  try {
+    base = new URL(configured);
+  } catch {
+    throw new DomainError(
+      'NORTH_PUBLIC_BASE_URL_INVALID',
+      'A URL pública da instalação é inválida.',
+      422,
+    );
+  }
+  const local = ['localhost', '127.0.0.1'].includes(base.hostname);
+  if ((!local || process.env.NODE_ENV === 'production') && base.protocol !== 'https:') {
+    throw new DomainError(
+      'NORTH_PUBLIC_BASE_URL_HTTPS_REQUIRED',
+      'A URL pública da instalação deve usar HTTPS.',
+      422,
+    );
+  }
+  if (base.username || base.password || base.search || base.hash) {
+    throw new DomainError(
+      'NORTH_PUBLIC_BASE_URL_UNSAFE',
+      'A URL pública não pode conter credenciais, query string ou fragmento.',
+      422,
+    );
+  }
+  base.pathname = `${base.pathname.replace(/\/$/, '')}${ASAAS_WEBHOOK_PATH}`;
+  return base.toString();
+}
+
+export function optionalAsaasWebhookUrl(): string | null {
+  try {
+    return configuredAsaasWebhookUrl();
+  } catch (error) {
+    if (error instanceof DomainError && error.code.startsWith('NORTH_PUBLIC_BASE_URL_'))
+      return null;
+    throw error;
+  }
+}
+
 function objectRoot(): string {
   return path.resolve(
     process.env.OBJECT_STORAGE_ROOT ?? path.join(process.cwd(), '.north-private-files'),
@@ -112,12 +166,18 @@ export interface AsaasChargeRequest {
 export class AsaasGateway {
   private readonly baseUrl: string;
 
-  constructor(private readonly apiKey: string) {
+  constructor(
+    private readonly apiKey: string,
+    private readonly environment: 'SANDBOX' | 'PRODUCTION' = 'SANDBOX',
+  ) {
+    assertAsaasApiKeyEnvironment(apiKey, environment);
     const configured = process.env.ASAAS_BASE_URL;
     if (configured && process.env.NODE_ENV !== 'test') {
       throw new Error('ASAAS_BASE_URL_OVERRIDE_NOT_ALLOWED');
     }
-    this.baseUrl = configured ?? 'https://api-sandbox.asaas.com/v3';
+    this.baseUrl =
+      configured ??
+      (environment === 'SANDBOX' ? 'https://api-sandbox.asaas.com/v3' : 'https://api.asaas.com/v3');
   }
 
   private async request<T>(pathname: string, init: RequestInit, attempts = 1): Promise<T> {
@@ -131,6 +191,9 @@ export class AsaasGateway {
       };
       if (process.env.NODE_ENV === 'test' && process.env.ASAAS_STUB_SCENARIO) {
         headers['x-stub-scenario'] = process.env.ASAAS_STUB_SCENARIO;
+      }
+      if (process.env.NODE_ENV === 'test') {
+        headers['x-north-asaas-environment'] = this.environment;
       }
       if (init.body !== undefined) headers['content-type'] = 'application/json';
       response = await fetch(`${this.baseUrl}${pathname}`, {
@@ -218,10 +281,41 @@ export class AsaasGateway {
   createWebhook(input: {
     name: string;
     url: string;
+    email: string;
+    enabled: boolean;
+    interrupted: boolean;
+    apiVersion: number;
     authToken: string;
+    sendType: 'SEQUENTIALLY';
     events: string[];
   }): Promise<{ id: string }> {
-    return this.request('/webhooks', { method: 'POST', body: JSON.stringify(input) }, 3);
+    return this.request('/webhooks', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  updateWebhook(
+    id: string,
+    input: {
+      name: string;
+      url: string;
+      email: string;
+      enabled: boolean;
+      interrupted: boolean;
+      apiVersion: number;
+      authToken: string;
+      sendType: 'SEQUENTIALLY';
+      events: string[];
+    },
+  ): Promise<{ id: string }> {
+    return this.request(`/webhooks/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  }
+
+  listWebhooks(): Promise<{
+    data: Array<{ id: string; name?: string; url?: string; enabled?: boolean }>;
+  }> {
+    return this.request('/webhooks', { method: 'GET' }, 3);
   }
 
   deleteWebhook(id: string): Promise<void> {
@@ -295,8 +389,11 @@ export function normalizeAsaasFees(payload: Record<string, unknown>): Normalized
   return [item('PIX', pix), item('BOLETO', boleto), item('CREDIT_CARD', card)];
 }
 
-export function safeHostedInvoiceUrl(value: string | undefined): string | null {
-  return value ? assertHostedInvoiceUrl(value, 'SANDBOX') : null;
+export function safeHostedInvoiceUrl(
+  value: string | undefined,
+  environment: 'SANDBOX' | 'PRODUCTION' = 'SANDBOX',
+): string | null {
+  return value ? assertHostedInvoiceUrl(value, environment) : null;
 }
 
 export function validateArtworkContent(mimeType: string, content: Buffer): void {

@@ -11,12 +11,14 @@ import {
   scaledToQuantity,
 } from '@north/domain';
 import {
+  assertAsaasApiKeyEnvironment,
   assertOrderTransition,
   assertStockException,
   calculatePaymentFee,
   calculateDepositCents,
   evaluateOrderReadiness,
   normalizeAndValidateTaxDocument,
+  maskIntegrationEmail,
   paymentEventStatus,
   type OrderStatus,
 } from '@north/domain/fulfillment';
@@ -29,12 +31,15 @@ import {
 } from './commercial-shared.js';
 import {
   AsaasGateway,
+  configuredAsaasWebhookUrl,
   decryptSecret,
   encryptSecret,
+  generateWebhookAuthToken,
   PrivateObjectStorage,
   protectedHash,
   shortFingerprint,
   normalizeAsaasFees,
+  optionalAsaasWebhookUrl,
   safeHostedInvoiceUrl,
   validateArtworkContent,
 } from './fulfillment-infrastructure.js';
@@ -64,6 +69,7 @@ interface OrderRow {
 
 interface SecretRow {
   id: string;
+  environment: 'SANDBOX' | 'PRODUCTION';
   apiKeyCiphertext: Buffer;
   apiKeyNonce: Buffer;
   apiKeyAuthTag: Buffer;
@@ -73,6 +79,9 @@ interface SecretRow {
   webhookPublicUrl: string;
   keyFingerprint: string;
   externalWebhookId: string | null;
+  notificationEmailCiphertext: Buffer;
+  notificationEmailNonce: Buffer;
+  notificationEmailAuthTag: Buffer;
 }
 
 interface ArtworkDetailRow {
@@ -94,10 +103,21 @@ interface FinancialDecisionDetailRow {
 
 interface AsaasConfigurationView {
   id?: string;
-  environment: 'SANDBOX';
+  environment: 'SANDBOX' | 'PRODUCTION';
   status: string;
   webhookPublicUrl?: string;
   keyFingerprint?: string;
+  notificationEmailMasked?: string;
+  externalWebhookId?: string;
+  webhookSendType?: string;
+  webhookApiVersion?: number;
+  webhookEvents?: string[];
+  webhookStatus?: string;
+  lastValidatedAt?: Date;
+  lastSuccessAt?: Date;
+  lastEventReceivedAt?: Date;
+  lastFailureCategory?: string;
+  paymentMethods?: Array<{ billingType: BillingType; enabled: boolean }>;
   version?: number;
   createdAt?: Date;
   updatedAt?: Date;
@@ -105,6 +125,17 @@ interface AsaasConfigurationView {
 
 type BillingType = 'PIX' | 'BOLETO' | 'CREDIT_CARD';
 type FeeStrategy = 'ABSORB' | 'PASS_THROUGH';
+const ASAAS_PAYMENT_EVENTS = [
+  'PAYMENT_CREATED',
+  'PAYMENT_UPDATED',
+  'PAYMENT_CONFIRMED',
+  'PAYMENT_RECEIVED',
+  'PAYMENT_OVERDUE',
+  'PAYMENT_PARTIALLY_REFUNDED',
+  'PAYMENT_REFUNDED',
+  'PAYMENT_CHARGEBACK_REQUESTED',
+] as const;
+const ASAAS_WEBHOOK_NAME = 'NORTH ERP - pagamentos';
 
 async function audit(
   client: DatabaseClient,
@@ -173,17 +204,21 @@ export class FulfillmentRepository {
   ): Promise<SecretRow> {
     const result = await client.query<SecretRow>(
       `SELECT id,api_key_ciphertext AS "apiKeyCiphertext",api_key_nonce AS "apiKeyNonce",
+              environment,
               api_key_auth_tag AS "apiKeyAuthTag",webhook_token_ciphertext AS "webhookTokenCiphertext",
               webhook_token_nonce AS "webhookTokenNonce",webhook_token_auth_tag AS "webhookTokenAuthTag",
               webhook_public_url AS "webhookPublicUrl",key_fingerprint AS "keyFingerprint",
-              external_webhook_id AS "externalWebhookId"
-       FROM asaas_connections WHERE status ${includePending ? "IN ('CONNECTED','ROTATION_PENDING','DISCONNECT_PENDING','ERROR')" : "='CONNECTED'"}
-         AND environment='SANDBOX' ORDER BY updated_at DESC LIMIT 1`,
+              external_webhook_id AS "externalWebhookId",
+              notification_email_ciphertext AS "notificationEmailCiphertext",
+              notification_email_nonce AS "notificationEmailNonce",
+              notification_email_auth_tag AS "notificationEmailAuthTag"
+       FROM asaas_connections WHERE status ${includePending ? "IN ('ACTIVE','VALIDATING','DISCONNECTING','DEGRADED')" : "='ACTIVE'"}
+         ORDER BY updated_at DESC LIMIT 1`,
     );
     if (!result.rows[0]) {
       throw new DomainError(
         'ASAAS_NOT_CONFIGURED',
-        'A conexão Sandbox do Asaas não está configurada.',
+        'A integração Asaas ainda não está ativa. Peça ao gestor para concluir a configuração.',
         422,
       );
     }
@@ -660,89 +695,158 @@ export class FulfillmentRepository {
   async configureAsaas(
     actor: CurrentActor,
     input: {
-      environment: 'SANDBOX';
+      environment: 'SANDBOX' | 'PRODUCTION';
       apiKey: string;
+      notificationEmail: string;
       webhookAuthToken: string;
-      webhookPublicUrl: string;
     },
     key: string,
     correlationId: string,
   ): Promise<AsaasConfigurationView> {
-    const id = randomUUID();
-    const gateway = new AsaasGateway(input.apiKey);
-    const fees = await gateway.getFees();
-    const webhook = await gateway.createWebhook({
-      name: 'NORTH ERP - pagamentos',
-      url: input.webhookPublicUrl,
-      authToken: input.webhookAuthToken,
-      events: [
-        'PAYMENT_CREATED',
-        'PAYMENT_UPDATED',
-        'PAYMENT_CONFIRMED',
-        'PAYMENT_RECEIVED',
-        'PAYMENT_OVERDUE',
-        'PAYMENT_PARTIALLY_REFUNDED',
-        'PAYMENT_REFUNDED',
-        'PAYMENT_CHARGEBACK_REQUESTED',
-      ],
-    });
-    const apiKey = encryptSecret(input.apiKey, `asaas:${id}:api-key`);
-    const webhookToken = encryptSecret(input.webhookAuthToken, `asaas:${id}:webhook-token`);
+    assertAsaasApiKeyEnvironment(input.apiKey, input.environment);
+    if (input.apiKey === input.webhookAuthToken) {
+      throw new DomainError(
+        'ASAAS_WEBHOOK_TOKEN_REUSES_API_KEY',
+        'O token do Webhook deve ser diferente da API Key.',
+        422,
+      );
+    }
+    const webhookPublicUrl = configuredAsaasWebhookUrl();
     const payload = {
       environment: input.environment,
-      webhookPublicUrl: input.webhookPublicUrl,
+      webhookPublicUrl,
       keyFingerprint: shortFingerprint(input.apiKey),
       webhookTokenFingerprint: shortFingerprint(input.webhookAuthToken),
+      notificationEmailMasked: maskIntegrationEmail(input.notificationEmail),
     };
-    return transaction(async (client) => {
-      const locked = await lockIdempotency(client, { scope: 'asaas-connection', key, payload });
-      if (locked.replayResourceId) return await this.getAsaasConfiguration(client);
-      await client.query(
-        `UPDATE asaas_connections SET status='DISCONNECTED',api_key_ciphertext=NULL,api_key_nonce=NULL,
+    try {
+      return await transaction(async (client) => {
+        const locked = await lockIdempotency(client, { scope: 'asaas-connection', key, payload });
+        if (locked.replayResourceId) return await this.getAsaasConfiguration(client);
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended('asaas-connection-lifecycle',0))",
+        );
+        const id = randomUUID();
+        const gateway = new AsaasGateway(input.apiKey, input.environment);
+        const fees = await gateway.getFees();
+        const webhookInput = {
+          name: ASAAS_WEBHOOK_NAME,
+          url: webhookPublicUrl,
+          email: input.notificationEmail,
+          enabled: true,
+          interrupted: false,
+          apiVersion: 3,
+          authToken: input.webhookAuthToken,
+          sendType: 'SEQUENTIALLY' as const,
+          events: [...ASAAS_PAYMENT_EVENTS],
+        };
+        const findExisting = async () =>
+          (await gateway.listWebhooks()).data.find(
+            (item) => item.name === ASAAS_WEBHOOK_NAME && item.url === webhookPublicUrl,
+          );
+        let webhook = await findExisting();
+        if (!webhook) {
+          try {
+            webhook = await gateway.createWebhook(webhookInput);
+          } catch (error) {
+            if (!(error instanceof DomainError) || error.code !== 'ASAAS_TIMEOUT') throw error;
+            webhook = await findExisting();
+            if (!webhook) throw error;
+          }
+        }
+        const apiKey = encryptSecret(input.apiKey, `asaas:${id}:api-key`);
+        const webhookToken = encryptSecret(input.webhookAuthToken, `asaas:${id}:webhook-token`);
+        const notificationEmail = encryptSecret(
+          input.notificationEmail.trim().toLowerCase(),
+          `asaas:${id}:notification-email`,
+        );
+        await client.query(
+          `UPDATE asaas_connections SET status='DISCONNECTED',api_key_ciphertext=NULL,api_key_nonce=NULL,
          api_key_auth_tag=NULL,webhook_token_ciphertext=NULL,webhook_token_nonce=NULL,
          webhook_token_auth_tag=NULL,disconnected_at=clock_timestamp(),updated_by=$1,
-         updated_at=clock_timestamp() WHERE status='CONNECTED'`,
-        [actor.id],
-      );
-      await client.query(
-        `INSERT INTO asaas_connections
+         updated_at=clock_timestamp() WHERE status IN ('CONFIGURING','VALIDATING','ACTIVE','DEGRADED')`,
+          [actor.id],
+        );
+        await client.query(
+          `INSERT INTO asaas_connections
            (id,environment,status,api_key_ciphertext,api_key_nonce,api_key_auth_tag,
             webhook_token_ciphertext,webhook_token_nonce,webhook_token_auth_tag,
-            webhook_public_url,key_fingerprint,external_webhook_id,last_validated_at,created_by,updated_by)
-         VALUES($1,'SANDBOX','CONNECTED',$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp(),$11,$11)`,
-        [
-          id,
-          apiKey.ciphertext,
-          apiKey.nonce,
-          apiKey.authTag,
-          webhookToken.ciphertext,
-          webhookToken.nonce,
-          webhookToken.authTag,
-          input.webhookPublicUrl,
-          payload.keyFingerprint,
-          webhook.id,
-          actor.id,
-        ],
+            webhook_public_url,key_fingerprint,external_webhook_id,last_validated_at,
+            notification_email_ciphertext,notification_email_nonce,notification_email_auth_tag,
+            notification_email_masked,webhook_send_type,webhook_api_version,webhook_events,
+            webhook_status,last_success_at,created_by,updated_by)
+         VALUES($1,$2,'ACTIVE',$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp(),
+                $12,$13,$14,$15,'SEQUENTIALLY',3,$16::jsonb,'ACTIVE',clock_timestamp(),$17,$17)`,
+          [
+            id,
+            input.environment,
+            apiKey.ciphertext,
+            apiKey.nonce,
+            apiKey.authTag,
+            webhookToken.ciphertext,
+            webhookToken.nonce,
+            webhookToken.authTag,
+            webhookPublicUrl,
+            payload.keyFingerprint,
+            webhook.id,
+            notificationEmail.ciphertext,
+            notificationEmail.nonce,
+            notificationEmail.authTag,
+            payload.notificationEmailMasked,
+            JSON.stringify(ASAAS_PAYMENT_EVENTS),
+            actor.id,
+          ],
+        );
+        for (const billingType of ['PIX', 'BOLETO', 'CREDIT_CARD'] as const) {
+          await client.query(
+            `INSERT INTO asaas_payment_methods(id,connection_id,billing_type,enabled,updated_by)
+           VALUES($1,$2,$3,false,$4)`,
+            [randomUUID(), id, billingType, actor.id],
+          );
+        }
+        await this.storeFeeSnapshot(client, id, input.environment, fees, actor.id);
+        await client.query(
+          `INSERT INTO asaas_connection_operations
+           (id,connection_id,operation,result,key_fingerprint,environment,created_by)
+         VALUES($1,$2,'CONNECT','SUCCEEDED',$3,$4,$5)`,
+          [randomUUID(), id, payload.keyFingerprint, input.environment, actor.id],
+        );
+        await recordIdempotency(client, {
+          scope: 'asaas-connection',
+          key,
+          hash: locked.hash,
+          resourceType: 'asaas_connection',
+          resourceId: id,
+        });
+        await audit(client, {
+          actorType: 'USER',
+          actorId: actor.id,
+          action: 'ASAAS_CONNECTION_ACTIVATED',
+          resourceType: 'asaas_connection',
+          resourceId: id,
+          correlationId,
+          after: payload,
+        });
+        return await this.getAsaasConfiguration(client);
+      }, 'SERIALIZABLE');
+    } catch (error) {
+      const errorCode = error instanceof DomainError ? error.code : 'ASAAS_CONFIGURATION_FAILED';
+      await transaction((client) =>
+        audit(client, {
+          actorType: 'USER',
+          actorId: actor.id,
+          action: 'ASAAS_CONNECTION_VALIDATION_FAILED',
+          resourceType: 'asaas_connection',
+          correlationId,
+          after: {
+            environment: input.environment,
+            keyFingerprint: payload.keyFingerprint,
+            errorCode,
+          },
+        }),
       );
-      await this.storeFeeSnapshot(client, id, fees, actor.id);
-      await recordIdempotency(client, {
-        scope: 'asaas-connection',
-        key,
-        hash: locked.hash,
-        resourceType: 'asaas_connection',
-        resourceId: id,
-      });
-      await audit(client, {
-        actorType: 'USER',
-        actorId: actor.id,
-        action: 'ASAAS_SANDBOX_CONFIGURED',
-        resourceType: 'asaas_connection',
-        resourceId: id,
-        correlationId,
-        after: payload,
-      });
-      return await this.getAsaasConfiguration(client);
-    }, 'SERIALIZABLE');
+      throw error;
+    }
   }
 
   async getAsaasConfiguration(
@@ -750,15 +854,36 @@ export class FulfillmentRepository {
   ): Promise<AsaasConfigurationView> {
     const result = await client.query<AsaasConfigurationView>(
       `SELECT id,environment,status,webhook_public_url AS "webhookPublicUrl",
-              key_fingerprint AS "keyFingerprint",version,created_at AS "createdAt",updated_at AS "updatedAt"
+              key_fingerprint AS "keyFingerprint",notification_email_masked AS "notificationEmailMasked",
+              external_webhook_id AS "externalWebhookId",webhook_send_type AS "webhookSendType",
+              webhook_api_version AS "webhookApiVersion",webhook_events AS "webhookEvents",
+              webhook_status AS "webhookStatus",last_validated_at AS "lastValidatedAt",
+              last_success_at AS "lastSuccessAt",last_event_received_at AS "lastEventReceivedAt",
+              last_failure_category AS "lastFailureCategory",version,
+              created_at AS "createdAt",updated_at AS "updatedAt"
        FROM asaas_connections ORDER BY updated_at DESC LIMIT 1`,
     );
-    return result.rows[0] ?? { status: 'NOT_CONFIGURED', environment: 'SANDBOX' };
+    const row = result.rows[0];
+    if (!row) {
+      return {
+        status: 'NOT_CONFIGURED',
+        environment: 'SANDBOX',
+        webhookPublicUrl: optionalAsaasWebhookUrl() ?? undefined,
+        paymentMethods: [],
+      };
+    }
+    const methods = await client.query<{ billingType: BillingType; enabled: boolean }>(
+      `SELECT billing_type AS "billingType",enabled FROM asaas_payment_methods
+       WHERE connection_id=$1 ORDER BY billing_type`,
+      [row.id],
+    );
+    return { ...row, paymentMethods: methods.rows };
   }
 
   private async storeFeeSnapshot(
     client: Pick<DatabaseClient, 'query'>,
     connectionId: string,
+    environment: 'SANDBOX' | 'PRODUCTION',
     payload: Record<string, unknown>,
     actorId?: string,
   ): Promise<string> {
@@ -772,8 +897,8 @@ export class FulfillmentRepository {
     await client.query(
       `INSERT INTO asaas_fee_snapshots
          (id,connection_id,environment,status,fetched_at,sanitized_payload,created_by)
-       VALUES($1,$2,'SANDBOX','AVAILABLE',clock_timestamp(),$3::jsonb,$4)`,
-      [id, connectionId, JSON.stringify(safe), actorId ?? null],
+       VALUES($1,$2,$3,'AVAILABLE',clock_timestamp(),$4::jsonb,$5)`,
+      [id, connectionId, environment, JSON.stringify(safe), actorId ?? null],
     );
     for (const fee of normalizeAsaasFees(payload)) {
       await client.query(
@@ -805,7 +930,7 @@ export class FulfillmentRepository {
       `asaas:${connection.id}:api-key`,
     );
     try {
-      const payload = await new AsaasGateway(apiKey).getFees();
+      const payload = await new AsaasGateway(apiKey, connection.environment).getFees();
       return transaction(async (client) => {
         const locked = await lockIdempotency(client, {
           scope: 'asaas-fees-refresh',
@@ -813,7 +938,13 @@ export class FulfillmentRepository {
           payload: { connectionId: connection.id },
         });
         if (locked.replayResourceId) return this.getAsaasFees(client);
-        const snapshotId = await this.storeFeeSnapshot(client, connection.id, payload, actor.id);
+        const snapshotId = await this.storeFeeSnapshot(
+          client,
+          connection.id,
+          connection.environment,
+          payload,
+          actor.id,
+        );
         await recordIdempotency(client, {
           scope: 'asaas-fees-refresh',
           key,
@@ -828,7 +959,7 @@ export class FulfillmentRepository {
           resourceType: 'asaas_fee_snapshot',
           resourceId: snapshotId,
           correlationId,
-          after: { environment: 'SANDBOX', status: 'AVAILABLE' },
+          after: { environment: connection.environment, status: 'AVAILABLE' },
         });
         return this.getAsaasFees(client);
       }, 'SERIALIZABLE');
@@ -837,8 +968,8 @@ export class FulfillmentRepository {
       await pool.query(
         `INSERT INTO asaas_fee_snapshots
            (id,connection_id,environment,status,sanitized_payload,error_code,created_by)
-         VALUES($1,$2,'SANDBOX','FAILED','{}'::jsonb,$3,$4)`,
-        [randomUUID(), connection.id, code, actor.id],
+         VALUES($1,$2,$3,'FAILED','{}'::jsonb,$4,$5)`,
+        [randomUUID(), connection.id, connection.environment, code, actor.id],
       );
       throw error;
     }
@@ -864,6 +995,51 @@ export class FulfillmentRepository {
       [snapshot.id],
     );
     return { ...snapshot, items: items.rows, effectivePaymentConditionMayPrevail: true };
+  }
+
+  generateAsaasWebhookToken() {
+    return { token: generateWebhookAuthToken(), displayedOnce: true };
+  }
+
+  async putAsaasPaymentMethods(
+    actor: CurrentActor,
+    methods: BillingType[],
+    key: string,
+    correlationId: string,
+  ) {
+    return transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: 'asaas-payment-methods',
+        key,
+        payload: { methods: [...methods].sort() },
+      });
+      if (locked.replayResourceId) return this.getAsaasConfiguration(client);
+      const connection = await this.activeConnection(client);
+      for (const billingType of ['PIX', 'BOLETO', 'CREDIT_CARD'] as const) {
+        await client.query(
+          `UPDATE asaas_payment_methods SET enabled=$3,updated_by=$4,updated_at=clock_timestamp()
+           WHERE connection_id=$1 AND billing_type=$2`,
+          [connection.id, billingType, methods.includes(billingType), actor.id],
+        );
+      }
+      await recordIdempotency(client, {
+        scope: 'asaas-payment-methods',
+        key,
+        hash: locked.hash,
+        resourceType: 'asaas_connection',
+        resourceId: connection.id,
+      });
+      await audit(client, {
+        actorType: 'USER',
+        actorId: actor.id,
+        action: 'ASAAS_PAYMENT_METHODS_UPDATED',
+        resourceType: 'asaas_connection',
+        resourceId: connection.id,
+        correlationId,
+        after: { methods: [...methods].sort() },
+      });
+      return this.getAsaasConfiguration(client);
+    }, 'SERIALIZABLE');
   }
 
   async putFeePolicy(
@@ -955,8 +1131,8 @@ export class FulfillmentRepository {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended('asaas-key-rotation',0))");
       const current = await this.activeConnection(client);
       const changed = await client.query(
-        `UPDATE asaas_connections SET status='ROTATION_PENDING',updated_by=$2,updated_at=clock_timestamp()
-         WHERE id=$1 AND status='CONNECTED'`,
+        `UPDATE asaas_connections SET status='VALIDATING',updated_by=$2,updated_at=clock_timestamp()
+         WHERE id=$1 AND status='ACTIVE'`,
         [current.id, actor.id],
       );
       if (changed.rowCount !== 1)
@@ -967,20 +1143,22 @@ export class FulfillmentRepository {
         );
       await client.query(
         `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,created_by)
-         VALUES($1,$2,'ROTATE','STARTED',$3,'SANDBOX',$4)`,
-        [randomUUID(), current.id, shortFingerprint(newApiKey), actor.id],
+         VALUES($1,$2,'ROTATE','STARTED',$3,$4,$5)`,
+        [randomUUID(), current.id, shortFingerprint(newApiKey), current.environment, actor.id],
       );
       return current;
     }, 'SERIALIZABLE');
     try {
-      const fees = await new AsaasGateway(newApiKey).getFees();
+      assertAsaasApiKeyEnvironment(newApiKey, connection.environment);
+      const fees = await new AsaasGateway(newApiKey, connection.environment).getFees();
       const encrypted = encryptSecret(newApiKey, `asaas:${connection.id}:api-key`);
       await transaction(async (client) => {
         const result = await client.query(
-          `UPDATE asaas_connections SET status='CONNECTED',api_key_ciphertext=$2,api_key_nonce=$3,
+          `UPDATE asaas_connections SET status='ACTIVE',api_key_ciphertext=$2,api_key_nonce=$3,
              api_key_auth_tag=$4,key_fingerprint=$5,last_validated_at=clock_timestamp(),last_error_code=NULL,
+             last_success_at=clock_timestamp(),last_failure_category=NULL,
              version=version+1,updated_by=$6,updated_at=clock_timestamp()
-           WHERE id=$1 AND status='ROTATION_PENDING'`,
+           WHERE id=$1 AND status='VALIDATING'`,
           [
             connection.id,
             encrypted.ciphertext,
@@ -992,7 +1170,13 @@ export class FulfillmentRepository {
         );
         if (result.rowCount !== 1)
           throw new DomainError('ASAAS_ROTATION_CONFLICT', 'A rotação perdeu a concorrência.', 409);
-        const snapshotId = await this.storeFeeSnapshot(client, connection.id, fees, actor.id);
+        const snapshotId = await this.storeFeeSnapshot(
+          client,
+          connection.id,
+          connection.environment,
+          fees,
+          actor.id,
+        );
         await recordIdempotency(client, {
           scope: 'asaas-key-rotation',
           key,
@@ -1002,8 +1186,14 @@ export class FulfillmentRepository {
         });
         await client.query(
           `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,created_by)
-           VALUES($1,$2,'ROTATE','SUCCEEDED',$3,'SANDBOX',$4)`,
-          [randomUUID(), connection.id, shortFingerprint(newApiKey), actor.id],
+           VALUES($1,$2,'ROTATE','SUCCEEDED',$3,$4,$5)`,
+          [
+            randomUUID(),
+            connection.id,
+            shortFingerprint(newApiKey),
+            connection.environment,
+            actor.id,
+          ],
         );
         await audit(client, {
           actorType: 'USER',
@@ -1013,7 +1203,7 @@ export class FulfillmentRepository {
           resourceId: connection.id,
           correlationId,
           after: {
-            environment: 'SANDBOX',
+            environment: connection.environment,
             keyFingerprint: shortFingerprint(newApiKey),
             feeSnapshotId: snapshotId,
           },
@@ -1023,17 +1213,111 @@ export class FulfillmentRepository {
     } catch (error) {
       const code = error instanceof DomainError ? error.code : 'ASAAS_ROTATION_FAILED';
       await pool.query(
-        `UPDATE asaas_connections SET status='CONNECTED',last_error_code=$2,updated_at=clock_timestamp()
-         WHERE id=$1 AND status='ROTATION_PENDING'`,
+        `UPDATE asaas_connections SET status='ACTIVE',last_error_code=$2,last_failure_category='ROTATION',
+         updated_at=clock_timestamp() WHERE id=$1 AND status='VALIDATING'`,
         [connection.id, code],
       );
       await pool.query(
         `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,error_code,created_by)
-         VALUES($1,$2,'ROTATE','FAILED',$3,'SANDBOX',$4,$5)`,
-        [randomUUID(), connection.id, shortFingerprint(newApiKey), code, actor.id],
+         VALUES($1,$2,'ROTATE','FAILED',$3,$4,$5,$6)`,
+        [
+          randomUUID(),
+          connection.id,
+          shortFingerprint(newApiKey),
+          connection.environment,
+          code,
+          actor.id,
+        ],
       );
       throw error;
     }
+  }
+
+  async rotateAsaasWebhookToken(
+    actor: CurrentActor,
+    newToken: string,
+    key: string,
+    correlationId: string,
+  ) {
+    return transaction(async (client) => {
+      const locked = await lockIdempotency(client, {
+        scope: 'asaas-webhook-token-rotation',
+        key,
+        payload: { fingerprint: shortFingerprint(newToken) },
+      });
+      if (locked.replayResourceId) return this.getAsaasConfiguration(client);
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('asaas-connection-lifecycle',0))",
+      );
+      const connection = await this.activeConnection(client);
+      const apiKey = decryptSecret(
+        {
+          ciphertext: connection.apiKeyCiphertext,
+          nonce: connection.apiKeyNonce,
+          authTag: connection.apiKeyAuthTag,
+        },
+        `asaas:${connection.id}:api-key`,
+      );
+      if (apiKey === newToken) {
+        throw new DomainError(
+          'ASAAS_WEBHOOK_TOKEN_REUSES_API_KEY',
+          'O token do Webhook deve ser diferente da API Key.',
+          422,
+        );
+      }
+      if (!connection.externalWebhookId) {
+        throw new DomainError('ASAAS_WEBHOOK_MISSING', 'Webhook externo não configurado.', 409);
+      }
+      const notificationEmail = decryptSecret(
+        {
+          ciphertext: connection.notificationEmailCiphertext,
+          nonce: connection.notificationEmailNonce,
+          authTag: connection.notificationEmailAuthTag,
+        },
+        `asaas:${connection.id}:notification-email`,
+      );
+      await new AsaasGateway(apiKey, connection.environment).updateWebhook(
+        connection.externalWebhookId,
+        {
+          name: ASAAS_WEBHOOK_NAME,
+          url: connection.webhookPublicUrl,
+          email: notificationEmail,
+          enabled: true,
+          interrupted: false,
+          apiVersion: 3,
+          authToken: newToken,
+          sendType: 'SEQUENTIALLY',
+          events: [...ASAAS_PAYMENT_EVENTS],
+        },
+      );
+      const encrypted = encryptSecret(newToken, `asaas:${connection.id}:webhook-token`);
+      await client.query(
+        `UPDATE asaas_connections SET webhook_token_ciphertext=$2,webhook_token_nonce=$3,
+         webhook_token_auth_tag=$4,version=version+1,updated_by=$5,updated_at=clock_timestamp()
+         WHERE id=$1 AND status='ACTIVE'`,
+        [connection.id, encrypted.ciphertext, encrypted.nonce, encrypted.authTag, actor.id],
+      );
+      await recordIdempotency(client, {
+        scope: 'asaas-webhook-token-rotation',
+        key,
+        hash: locked.hash,
+        resourceType: 'asaas_connection',
+        resourceId: connection.id,
+      });
+      await audit(client, {
+        actorType: 'USER',
+        actorId: actor.id,
+        action: 'ASAAS_WEBHOOK_TOKEN_ROTATED',
+        resourceType: 'asaas_connection',
+        resourceId: connection.id,
+        correlationId,
+        after: {
+          environment: connection.environment,
+          tokenFingerprint: shortFingerprint(newToken),
+        },
+      });
+      return this.getAsaasConfiguration(client);
+    }, 'SERIALIZABLE');
   }
 
   async getAsaasDisconnectImpact() {
@@ -1049,7 +1333,7 @@ export class FulfillmentRepository {
     );
     return {
       ...result.rows[0]!,
-      webhookConfigured: Boolean((await this.activeConnection()).externalWebhookId),
+      webhookConfigured: Boolean((await this.activeConnection(pool, true)).externalWebhookId),
     };
   }
 
@@ -1073,11 +1357,19 @@ export class FulfillmentRepository {
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended('asaas-connection-lifecycle',0))",
       );
-      const current = await this.activeConnection(client);
-      await client.query(
-        `UPDATE asaas_connections SET status='DISCONNECT_PENDING',updated_by=$2,updated_at=clock_timestamp() WHERE id=$1`,
+      const current = await this.activeConnection(client, true);
+      const changed = await client.query(
+        `UPDATE asaas_connections SET status='DISCONNECTING',updated_by=$2,updated_at=clock_timestamp()
+         WHERE id=$1 AND status IN ('ACTIVE','DEGRADED')`,
         [current.id, actor.id],
       );
+      if (changed.rowCount !== 1) {
+        throw new DomainError(
+          'ASAAS_DISCONNECT_CONFLICT',
+          'Outra operação da integração está em andamento.',
+          409,
+        );
+      }
       return current;
     }, 'SERIALIZABLE');
     if (!connection) return this.getAsaasConfiguration();
@@ -1091,13 +1383,16 @@ export class FulfillmentRepository {
     );
     try {
       if (connection.externalWebhookId)
-        await new AsaasGateway(apiKey).deleteWebhook(connection.externalWebhookId);
+        await new AsaasGateway(apiKey, connection.environment).deleteWebhook(
+          connection.externalWebhookId,
+        );
       await transaction(async (client) => {
         await client.query(
           `UPDATE asaas_connections SET status='DISCONNECTED',api_key_ciphertext=NULL,api_key_nonce=NULL,
              api_key_auth_tag=NULL,webhook_token_ciphertext=NULL,webhook_token_nonce=NULL,
              webhook_token_auth_tag=NULL,disconnected_at=clock_timestamp(),updated_by=$2,
-             version=version+1,updated_at=clock_timestamp() WHERE id=$1 AND status='DISCONNECT_PENDING'`,
+             webhook_status='DISCONNECTED',version=version+1,updated_at=clock_timestamp()
+           WHERE id=$1 AND status='DISCONNECTING'`,
           [connection.id, actor.id],
         );
         await recordIdempotency(client, {
@@ -1109,11 +1404,12 @@ export class FulfillmentRepository {
         });
         await client.query(
           `INSERT INTO asaas_connection_operations(id,connection_id,operation,result,key_fingerprint,environment,impact,created_by)
-           VALUES($1,$2,'DISCONNECT','SUCCEEDED',$3,'SANDBOX',$4::jsonb,$5)`,
+           VALUES($1,$2,'DISCONNECT','SUCCEEDED',$3,$4,$5::jsonb,$6)`,
           [
             randomUUID(),
             connection.id,
             connection.keyFingerprint,
+            connection.environment,
             JSON.stringify(impact),
             actor.id,
           ],
@@ -1125,21 +1421,22 @@ export class FulfillmentRepository {
           resourceType: 'asaas_connection',
           resourceId: connection.id,
           correlationId,
-          after: { environment: 'SANDBOX', impact },
+          after: { environment: connection.environment, impact },
         });
       });
       return this.getAsaasConfiguration();
     } catch (error) {
       const code = error instanceof DomainError ? error.code : 'ASAAS_WEBHOOK_DISABLE_FAILED';
       await pool.query(
-        `UPDATE asaas_connections SET status='ERROR',last_error_code=$2,updated_at=clock_timestamp() WHERE id=$1`,
+        `UPDATE asaas_connections SET status='DEGRADED',last_error_code=$2,
+         last_failure_category='DISCONNECT',updated_at=clock_timestamp() WHERE id=$1`,
         [connection.id, code],
       );
       throw new DomainError(
         'ASAAS_DISCONNECT_INCOMPLETE',
         'Não foi possível desativar o Webhook externo; o segredo foi preservado.',
         502,
-        { actionRequired: 'Desativar o Webhook no Sandbox e tentar novamente.' },
+        { actionRequired: 'Desativar o Webhook no ambiente selecionado e tentar novamente.' },
       );
     }
   }
@@ -1161,7 +1458,19 @@ export class FulfillmentRepository {
       const order = await this.orderRow(orderId, client, true);
       if (order.status === 'CANCELLED')
         throw new DomainError('ORDER_CANCELLED', 'Pedido cancelado.', 409);
-      await this.activeConnection(client);
+      const connection = await this.activeConnection(client);
+      const method = await client.query<{ enabled: boolean }>(
+        `SELECT enabled FROM asaas_payment_methods
+         WHERE connection_id=$1 AND billing_type=$2`,
+        [connection.id, input.billingType],
+      );
+      if (!method.rows[0]?.enabled) {
+        throw new DomainError(
+          'ASAAS_PAYMENT_METHOD_DISABLED',
+          'O meio de pagamento ainda não foi habilitado pelo gestor.',
+          422,
+        );
+      }
       const customer = await client.query<{ configured: boolean }>(
         `SELECT billing_document_ciphertext IS NOT NULL AS configured FROM customers WHERE id=$1`,
         [order.customerId],
@@ -1227,10 +1536,11 @@ export class FulfillmentRepository {
            (id,order_id,provider,environment,status,billing_type,amount_cents,due_date,
             external_reference,fee_policy_id,fee_policy_version,fee_snapshot_id,fee_strategy,
             estimated_fee_cents,estimated_net_cents,created_by)
-         VALUES($1,$2,'ASAAS','SANDBOX','PENDING_CREATION',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+         VALUES($1,$2,'ASAAS',$3,'PENDING_CREATION',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [
           id,
           orderId,
+          connection.environment,
           input.billingType,
           feeCalculation.chargedAmountCents,
           input.dueDate,
@@ -1299,13 +1609,20 @@ export class FulfillmentRepository {
       event: body.event,
       payment: { id: body.payment.id, value: body.payment.value },
     };
-    const result = await pool.query(
-      `INSERT INTO asaas_webhook_inbox
-         (id,external_event_id,event_type,external_charge_id,payload,status)
-       VALUES($1,$2,$3,$4,$5::jsonb,'RECEIVED') ON CONFLICT(external_event_id) DO NOTHING`,
-      [randomUUID(), body.id, body.event, body.payment.id, JSON.stringify(safePayload)],
-    );
-    return { received: true, duplicate: result.rowCount === 0 };
+    return transaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO asaas_webhook_inbox
+           (id,external_event_id,event_type,external_charge_id,payload,status)
+         VALUES($1,$2,$3,$4,$5::jsonb,'RECEIVED') ON CONFLICT(external_event_id) DO NOTHING`,
+        [randomUUID(), body.id, body.event, body.payment.id, JSON.stringify(safePayload)],
+      );
+      await client.query(
+        `UPDATE asaas_connections SET last_event_received_at=clock_timestamp(),updated_at=clock_timestamp()
+         WHERE id=$1`,
+        [connection.id],
+      );
+      return { received: true, duplicate: result.rowCount === 0 };
+    });
   }
 
   async uploadArtwork(
@@ -2063,20 +2380,22 @@ export class FulfillmentRepository {
       amountCents: string;
       dueDate: string;
       externalReference: string;
+      environment: 'SANDBOX' | 'PRODUCTION';
     }>(
       `SELECT c.order_id AS "orderId",o.customer_id AS "customerId",o.customer_name_snapshot AS "customerName",
               u.billing_document_ciphertext AS "documentCiphertext",u.billing_document_nonce AS "documentNonce",
               u.billing_document_auth_tag AS "documentAuthTag",u.billing_document_hash AS "documentHash",
               b.external_customer_id AS "externalCustomerId",c.billing_type AS "billingType",
-              c.amount_cents::text AS "amountCents",c.due_date::text AS "dueDate",c.external_reference AS "externalReference"
+              c.amount_cents::text AS "amountCents",c.due_date::text AS "dueDate",
+              c.external_reference AS "externalReference",c.environment
        FROM payment_charges c JOIN orders o ON o.id=c.order_id JOIN customers u ON u.id=o.customer_id
-       LEFT JOIN asaas_customer_bindings b ON b.customer_id=o.customer_id AND b.environment='SANDBOX'
+       LEFT JOIN asaas_customer_bindings b ON b.customer_id=o.customer_id AND b.environment=c.environment
        WHERE c.id=$1`,
       [chargeId],
     );
     const charge = data.rows[0];
     if (!charge) throw new Error('CHARGE_NOT_FOUND');
-    const gateway = new AsaasGateway(apiKey);
+    const gateway = new AsaasGateway(apiKey, connection.environment);
     let externalCustomerId = charge.externalCustomerId;
     if (!externalCustomerId) {
       const document = decryptSecret(
@@ -2105,8 +2424,8 @@ export class FulfillmentRepository {
       externalCustomerId = external.id;
       await pool.query(
         `INSERT INTO asaas_customer_bindings(id,customer_id,environment,external_customer_id,document_hash)
-         VALUES($1,$2,'SANDBOX',$3,$4) ON CONFLICT(customer_id,environment) DO NOTHING`,
-        [randomUUID(), charge.customerId, external.id, charge.documentHash],
+         VALUES($1,$2,$3,$4,$5) ON CONFLICT(customer_id,environment) DO NOTHING`,
+        [randomUUID(), charge.customerId, charge.environment, external.id, charge.documentHash],
       );
     }
     let external = (await gateway.findCharges(charge.externalReference)).data[0];
@@ -2124,7 +2443,7 @@ export class FulfillmentRepository {
         if (!external) throw error;
       }
     }
-    const invoiceUrl = safeHostedInvoiceUrl(external.invoiceUrl);
+    const invoiceUrl = safeHostedInvoiceUrl(external.invoiceUrl, charge.environment);
     await transaction(async (client) => {
       await client.query(
         `UPDATE payment_charges SET external_charge_id=$2,status='CREATED',invoice_url=$3,
@@ -2139,7 +2458,7 @@ export class FulfillmentRepository {
         correlationId: randomUUID(),
         after: {
           provider: 'ASAAS',
-          environment: 'SANDBOX',
+          environment: charge.environment,
           externalChargeId: external.id,
           status: external.status,
         },

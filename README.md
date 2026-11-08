@@ -121,19 +121,25 @@ Na revisão R1 do Sprint 003, a política de sinal aceita percentual ou valor fi
 configuração gerencial do Asaas consulta taxas da própria conta, versiona absorção ou
 repasse por meio, rotaciona a chave somente após validação e desconecta apenas depois
 de analisar pendências e remover o Webhook. Cartão usa exclusivamente a experiência
-hospedada do Asaas; o NORTH não recebe dados de cartão. A homologação real requer as
-quatro variáveis `ASAAS_ENVIRONMENT`, `ASAAS_API_KEY`,
-`ASAAS_WEBHOOK_AUTH_TOKEN` e `ASAAS_WEBHOOK_PUBLIC_URL` fora do repositório.
+hospedada do Asaas; o NORTH não recebe dados de cartão.
+
+Na revisão R2, cada instalação começa com o Asaas não configurado. O gestor usa
+`Configurações → Pagamentos → Asaas` para escolher Sandbox ou Produção, informar a
+API Key e o e-mail de alertas, informar ou gerar explicitamente o token e validar a
+conexão. A URL do Webhook é derivada de `NORTH_PUBLIC_BASE_URL` e exibida somente para
+leitura. A chave e o token nunca voltam pela API. Sem estado `ACTIVE`, somente a
+cobrança automática fica bloqueada; os demais módulos continuam funcionando.
 
 Artes PNG, JPEG e PDF ficam em armazenamento privado, fora do banco e ignorado pelo
 Git. API key, token do webhook e documento de cobrança são cifrados com AES-256-GCM.
 Em execução não local, `NORTH_SECRET_MASTER_KEY` é obrigatória. O worker processa
 outbox/inbox com repetição segura; o webhook persiste antes de responder HTTP 200.
 
-A integração habilitada é exclusivamente o Asaas Sandbox. Para desenvolvimento e
-E2E existe um stub contratual; homologação real exige credenciais fornecidas por
-variáveis ou pela tela gerencial e uma URL HTTPS pública. Nenhum segredo deve ser
-passado por argumento de comando ou commitado.
+Desenvolvimento e E2E usam um stub contratual estrito, sem credenciais externas. A
+homologação real deve ocorrer durante a implantação de cada empresa, primeiro em
+Sandbox e depois, quando aprovada, em Produção. Seu estado documental é
+`PENDENTE DE IMPLANTAÇÃO POR EMPRESA`; nenhum segredo deve ser passado por argumento,
+log, chat ou commit.
 
 ## Arquitetura e segurança
 
@@ -150,6 +156,6 @@ passado por argumento de comando ou commitado.
   por constraints e triggers, além das invariantes da API.
 
 Esta entrega não declara prontidão de produção: recuperação de senha, MFA, control
-plane global, política jurídica de retenção e homologação real do Sandbox permanecem
+plane global, política jurídica de retenção e homologação por instalação permanecem
 pendentes. Produção, consumo, qualidade, cobrança de saldo, entrega e estorno
 automático não fazem parte do Sprint 003.

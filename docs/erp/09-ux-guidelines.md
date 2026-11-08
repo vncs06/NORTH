@@ -35,6 +35,13 @@ custo, falha da IA e fila humana indisponível com causa e ação recomendada.
 
 - Conectar conta/número e validar recebimento e envio.
 - Conectar conta Asaas com guia para criar chave, validação, status, rotação e teste.
+- O assistente Asaas explica que conta e dinheiro pertencem à empresa; separa Sandbox
+  de Produção; recebe a chave uma vez; solicita e-mail de alertas; oferece geração
+  explícita do token; mostra a URL confiável somente para leitura; e só habilita meios
+  após conexão ativa. Refresh nunca repõe segredo nos campos.
+- Estados `NOT_CONFIGURED`, `CONFIGURING`, `VALIDATING`, `ACTIVE`, `DEGRADED`,
+  `DISCONNECTING` e `DISCONNECTED` mostram causa e próxima ação. Sem integração, a
+  cobrança aponta o caminho de configuração sem transformar o restante do ERP em erro.
 - Exibir meios habilitados, taxas vigentes, prazo de recebimento e estimativa líquida,
   sempre com data da consulta e aviso de que a condição contratual da conta prevalece.
 - Simular preço mostrando custo de materiais, demais componentes, margem e preço final.

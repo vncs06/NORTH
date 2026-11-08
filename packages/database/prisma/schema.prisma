@@ -215,7 +215,18 @@ model AsaasConnection {
   webhookPublicUrl      String    @map("webhook_public_url")
   keyFingerprint        String    @map("key_fingerprint") @db.Char(12)
   externalWebhookId     String?   @map("external_webhook_id")
+  notificationEmailCiphertext Bytes? @map("notification_email_ciphertext")
+  notificationEmailNonce Bytes? @map("notification_email_nonce")
+  notificationEmailAuthTag Bytes? @map("notification_email_auth_tag")
+  notificationEmailMasked String? @map("notification_email_masked")
+  webhookSendType       String    @map("webhook_send_type")
+  webhookApiVersion     Int       @map("webhook_api_version")
+  webhookEvents         Json      @map("webhook_events")
+  webhookStatus         String    @map("webhook_status")
   lastValidatedAt       DateTime? @map("last_validated_at") @db.Timestamptz(6)
+  lastSuccessAt         DateTime? @map("last_success_at") @db.Timestamptz(6)
+  lastFailureCategory   String?   @map("last_failure_category")
+  lastEventReceivedAt   DateTime? @map("last_event_received_at") @db.Timestamptz(6)
   disconnectedAt        DateTime? @map("disconnected_at") @db.Timestamptz(6)
   lastErrorCode         String?   @map("last_error_code")
   version               Int
@@ -224,6 +235,17 @@ model AsaasConnection {
   createdAt             DateTime  @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime  @map("updated_at") @db.Timestamptz(6)
   @@map("asaas_connections")
+}
+
+model AsaasPaymentMethod {
+  id            String   @id @db.Uuid
+  connectionId  String   @map("connection_id") @db.Uuid
+  billingType   String   @map("billing_type")
+  enabled       Boolean
+  updatedBy     String   @map("updated_by") @db.Uuid
+  updatedAt     DateTime @map("updated_at") @db.Timestamptz(6)
+  @@unique([connectionId, billingType])
+  @@map("asaas_payment_methods")
 }
 
 model AsaasFeeSnapshot {

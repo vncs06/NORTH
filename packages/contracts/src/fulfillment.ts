@@ -26,15 +26,25 @@ export const putDepositPolicySchema = z.discriminatedUnion('mode', [
 
 export const convertQuoteSchema = z.object({ quoteId: uuid });
 
-export const configureAsaasSchema = z.object({
-  environment: z.literal('SANDBOX'),
-  apiKey: z.string().trim().min(20).max(500),
-  webhookAuthToken: z.string().min(32).max(255).regex(/^\S+$/),
-  webhookPublicUrl: z
-    .string()
-    .url()
-    .max(2048)
-    .refine((value) => value.startsWith('https://')),
+export const configureAsaasSchema = z
+  .object({
+    environment: z.enum(['SANDBOX', 'PRODUCTION']),
+    apiKey: z.string().trim().min(20).max(500),
+    notificationEmail: z.string().trim().email().max(320),
+    webhookAuthToken: z.string().min(32).max(255).regex(/^\S+$/),
+  })
+  .superRefine((input, context) => {
+    if (input.webhookAuthToken === input.apiKey) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['webhookAuthToken'],
+        message: 'O token do Webhook deve ser diferente da API Key.',
+      });
+    }
+  });
+
+export const putAsaasPaymentMethodsSchema = z.object({
+  methods: z.array(z.enum(['PIX', 'BOLETO', 'CREDIT_CARD'])).max(3),
 });
 
 export const createChargeSchema = z.object({
@@ -55,6 +65,9 @@ export const feePolicySchema = z.object({
 });
 
 export const rotateAsaasKeySchema = z.object({ apiKey: z.string().trim().min(20).max(500) });
+export const rotateAsaasWebhookTokenSchema = z.object({
+  webhookAuthToken: z.string().min(32).max(255).regex(/^\S+$/),
+});
 export const disconnectAsaasSchema = z.object({ confirmImpact: z.literal(true) });
 
 export const requestArtworkApprovalSchema = z.object({});

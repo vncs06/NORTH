@@ -37,13 +37,19 @@ test('fluxo vertical: pedido, sinal, arte, webhook e reserva; mais exceção de 
   await manager.getByLabel('Percentual do sinal (pontos-base)').fill('5000');
   await manager.getByRole('button', { name: 'Ativar nova versão' }).click();
   await expect(manager.getByText('Política de sinal versionada e ativada.')).toBeVisible();
-  await manager.getByLabel('API key Sandbox').fill('stub-sandbox-api-key-000000000000');
-  await manager.getByLabel('Token do webhook').fill(webhookToken);
-  await manager
-    .getByLabel('URL pública HTTPS do webhook')
-    .fill('https://north.example.test/api/v1/webhooks/asaas/payments');
-  await manager.getByRole('button', { name: 'Salvar conexão cifrada' }).click();
-  await expect(manager.getByText('Conexão Sandbox armazenada de forma cifrada.')).toBeVisible();
+  await manager.getByLabel('API Key do Asaas').fill('stub-sandbox-api-key-000000000000');
+  await manager.getByLabel('E-mail para alertas da integração').fill('asaas-alerts@example.test');
+  await manager.getByLabel('Token de autenticação do Webhook').fill(webhookToken);
+  await expect(manager.getByLabel('URL do Webhook fornecida pelo NORTH')).toHaveValue(
+    'https://north.example.test/api/v1/webhooks/asaas/payments',
+  );
+  await manager.getByRole('button', { name: 'Validar e conectar' }).click();
+  await expect(
+    manager.getByText('Conexão validada, taxas consultadas e Webhook reconciliado.'),
+  ).toBeVisible();
+  await manager.locator('input[type="checkbox"][name="PIX"]').check();
+  await manager.locator('input[type="checkbox"][name="CREDIT_CARD"]').check();
+  await manager.getByRole('button', { name: 'Salvar meios habilitados' }).click();
   await manager.getByRole('button', { name: 'Ativar política versionada' }).click();
   await expect(manager.getByText('Política de absorção/repasse versionada.')).toBeVisible();
 
